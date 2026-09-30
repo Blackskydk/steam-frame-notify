@@ -1,0 +1,6 @@
+/build*/
+/.cache/
+*.user
+*.swp
+__pycache__/
+
