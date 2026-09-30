@@ -19,11 +19,12 @@ import sys
 import time
 import uuid
 
-from ancs_protocol import (ADDED, FLAG_PRE_EXISTING, FLAG_SILENT, REMOVED,
+from ancs_protocol import (ACTION_NEGATIVE, ADDED, FLAG_NEGATIVE_ACTION, FLAG_PRE_EXISTING,
+                           FLAG_SILENT, MODIFIED, REMOVED,
                            AppAttributeResponse, AttributeResponse, CONTROL_POINT_UUID,
                            DATA_SOURCE_UUID, NOTIFICATION_SOURCE_UUID,
                            SERVICE_UUID, app_attributes_request, attribute_request,
-                           parse_event)
+                           notification_key, parse_event, perform_action_request)
 
 BLUEZ = "org.bluez"
 OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
@@ -46,6 +47,10 @@ LINK_CHECKS = 15            # wait ~30 s after pairing for the iPhone's GATT ser
 NOTIFICATION_TIMEOUT_SECONDS = 15
 APP_NAME_TIMEOUT_SECONDS = 8
 APP_NAME_COOLDOWN_SECONDS = 3   # let a late app-name fragment arrive before the next request
+ID_PREFIX = "ancs-"             # the ids this bridge gives the notifications it forwards
+KEY_ID = re.compile(r"[0-9a-f]{24}")
+SESSION_ID = re.compile(r"[0-9a-f]{12}-([0-9]{1,10})")
+LOOKUP_LIMIT = 300              # older iPhone notifications that may be looked up to clear one
 
 
 def paired_devices(objects):
@@ -549,6 +554,7 @@ class Bridge:
     stopped = False    # class-level defaults keep partially built objects in tests working
     periodic_id = None
     matches = ()
+    seen = None        # optional SeenNotifications: what the Frame has been sent before
 
     def __init__(self, bus, glib, dbus, address, socket_path, solicit=False):
         self.bus = bus
@@ -583,6 +589,7 @@ class Bridge:
         self.loop = None
         self.failed = False
         self.reported_unavailable = False
+        self.init_tracking()
 
         self.manager = dbus.Interface(bus.get_object(BLUEZ, "/"), OBJECT_MANAGER)
         self.matches = [
@@ -594,6 +601,16 @@ class Bridge:
             bus.add_signal_receiver(self.on_interfaces_removed, signal_name="InterfacesRemoved",
                                     dbus_interface=OBJECT_MANAGER, bus_name=BLUEZ),
         ]
+
+    def init_tracking(self):
+        """What is known about the iPhone's notifications; UIDs are only good for one connection."""
+        self.uid_flags = {}        # uid -> Notification Source event flags
+        self.uid_by_key = {}       # notification key -> uid, for what has been read this connection
+        self.preexisting = set()   # uids that were already on the iPhone when this connection began
+        self.indexed = set()       # ...of which these have been read (so they are found by key)
+        self.lookups = deque()     # older uids waiting to be read, after the live notifications
+        self.lookup_uids = set()   # uids being read only to find one to clear
+        self.pending_clear = set() # keys the Frame cleared that have no uid yet
 
     def status(self, state, detail=""):
         if self.on_status is not None:
@@ -665,6 +682,9 @@ class Bridge:
         self.subscribed = self.subscribing = False
         self.queue.clear()
         self.queued.clear()
+        self.lookups.clear()
+        self.lookup_uids.clear()
+        self.pending_clear.clear()
         self.active = self.response = self.pending_attributes = None
         if self.advertising:
             try:
@@ -735,6 +755,7 @@ class Bridge:
         self.queue.clear()
         self.queued.clear()
         self.removed.clear()
+        self.init_tracking()
         self.active = self.response = None
         self.session = uuid.uuid4().hex[:12]
         self.reported_unavailable = False
@@ -839,18 +860,31 @@ class Bridge:
         if event.kind == REMOVED:
             if self.active and self.active[0] == event.uid:
                 self.removed.add(event.uid)
+            else:
+                self.lookup_uids.discard(event.uid)
             self.queue = deque(item for item in self.queue if item[0] != event.uid)
+            self.lookups = deque(item for item in self.lookups if item[0] != event.uid)
             self.queued.discard(event.uid)
+            self.forget_uid(event.uid)
+            self.end_lookup_if_done()
             return
         # ANCS UIDs are session-local. Ignore modifications and pre-existing
         # notifications so reconnecting does not replay old iPhone alerts.
         if event.kind != ADDED or event.flags & FLAG_PRE_EXISTING:
             # Say so: this is the only sign that the iPhone is sending anything at all.
             reason = "modified" if event.kind != ADDED else "already there when connecting"
-            print(f"[ANCS] Notification event uid={event.uid} ignored ({reason})", flush=True)
+            print(f"[ANCS] Notification event uid={event.uid} flags=0x{event.flags:02x} ignored ({reason})",
+                  flush=True)
+            # Remember it all the same: clearing it on the iPhone needs its uid and flags.
+            if event.kind == MODIFIED and event.uid in self.uid_flags:
+                self.uid_flags[event.uid] = event.flags
+            elif event.kind == ADDED:
+                self.uid_flags[event.uid] = event.flags
+                self.preexisting.add(event.uid)
             return
-        print(f"[ANCS] New notification event uid={event.uid}" +
+        print(f"[ANCS] New notification event uid={event.uid} flags=0x{event.flags:02x}" +
               (" (marked silent by the iPhone)" if event.flags & FLAG_SILENT else ""), flush=True)
+        self.uid_flags[event.uid] = event.flags
         if event.uid in self.queued or (self.active and self.active[0] == event.uid):
             return
         if len(self.queue) >= 100:
@@ -864,10 +898,12 @@ class Bridge:
     def next_request(self):
         if self.active is not None or self.hold_timer_id is not None:
             return
-        while self.queue:
-            uid, silent = self.queue.popleft()
+        # What just arrived comes first; reading old notifications only finds one to clear.
+        while self.queue or self.lookups:
+            uid, silent = (self.queue or self.lookups).popleft()
             self.queued.discard(uid)
             if uid in self.removed:
+                self.lookup_uids.discard(uid)
                 continue
             self.active = (uid, silent)
             self.response = AttributeResponse(uid)
@@ -875,13 +911,14 @@ class Bridge:
                                                             self.on_timeout)
             self.write_control_point(attribute_request(uid))
             return
+        self.end_lookup_if_done()
 
-    def write_control_point(self, request):
+    def write_control_point(self, request, error_handler=None):
         self.dbus.Interface(self.bus.get_object(BLUEZ, self.control_path),
                             CHARACTERISTIC).WriteValue(
             self.dbus.Array(request, signature="y"),
             self.dbus.Dictionary({"type": self.dbus.String("request")}, signature="sv"),
-            reply_handler=lambda: None, error_handler=self.on_write_error)
+            reply_handler=lambda: None, error_handler=error_handler or self.on_write_error)
 
     def request_app_name(self, app_identifier, attributes):
         """Asks the iPhone for an app's display name; False if the request cannot be made."""
@@ -934,6 +971,7 @@ class Bridge:
     def finish_request(self):
         if self.active:
             self.removed.discard(self.active[0])
+            self.lookup_uids.discard(self.active[0])
         if self.timeout_id:
             self.glib.source_remove(self.timeout_id)
             self.timeout_id = None
@@ -979,6 +1017,10 @@ class Bridge:
             self.forward_pending()
             self.finish_request()
             return
+        if self.active and self.active[0] in self.lookup_uids:
+            self.finish_lookup(self.active[0], result)
+            self.finish_request()
+            return
         # The notification's attributes are complete. Ask for the app's display name once per app.
         app_identifier = result.get(0)
         if (app_identifier and app_identifier not in self.app_names and
@@ -990,6 +1032,14 @@ class Bridge:
         self.finish_request()
 
     def forward(self, uid, silent, attributes):
+        key = notification_key(attributes)
+        if key is not None:
+            self.uid_by_key[key] = uid
+            if self.seen is not None and key in self.seen:
+                # Sent before, whether or not it is still on the Frame: it is not brought back.
+                print(f"[ANCS] Notification uid={uid} was sent before; not sending it again",
+                      flush=True)
+                return
         app_id = attributes.get(0) or ""
         app = self.app_names.get(app_id) or app_id or "iPhone"
         title = attributes.get(1) or attributes.get(2) or app
@@ -999,7 +1049,11 @@ class Bridge:
         # muted or in a Focus). In the headset they are worth seeing all the same, so they get a
         # toast too, unless FRAME_NOTIFY_QUIET_NO_TOAST is set.
         quiet = silent and os.environ.get("FRAME_NOTIFY_QUIET_NO_TOAST", "") not in ("", "0")
-        event = {"type": "notification", "id": f"ancs-{self.session}-{uid}",
+        # The key is the same on every connection, which is what lets the Frame recognise a
+        # notification it already has. Without one, the id is only good for this connection.
+        notification_id = (f"{ID_PREFIX}{key}" if key is not None
+                           else f"{ID_PREFIX}{self.session}-{uid}")
+        event = {"type": "notification", "id": notification_id,
                  "app": app, "title": title, "message": message,
                  "timestamp": timestamp, "toast": "false" if quiet else "true"}
         if silent:
@@ -1015,6 +1069,93 @@ class Bridge:
         except OSError as error:
             print("[ANCS] Frame Notify socket unavailable:", error,
                   file=sys.stderr, flush=True)
+            return
+        if key is not None and self.seen is not None:
+            self.seen.add(key)
+
+    # ---- clearing on the iPhone ---------------------------------------------------------------
+
+    def forget_uid(self, uid):
+        self.uid_flags.pop(uid, None)
+        self.preexisting.discard(uid)
+        self.indexed.discard(uid)
+        for key in [key for key, known in self.uid_by_key.items() if known == uid]:
+            del self.uid_by_key[key]
+
+    def find_uid(self, notification_id):
+        """(uid, key) for one of the ids this bridge handed out; each is None when not known."""
+        if not notification_id.startswith(ID_PREFIX):
+            return None, None
+        name = notification_id[len(ID_PREFIX):]
+        if KEY_ID.fullmatch(name):
+            return self.uid_by_key.get(name), name
+        match = SESSION_ID.fullmatch(name)
+        if match and name.startswith(self.session + "-") and int(match.group(1)) <= 0xFFFFFFFF:
+            return int(match.group(1)), None     # the form without a key, good for this connection
+        return None, None
+
+    def clear_on_phone(self, notification_ids):
+        """Clears the notifications the Frame has just cleared on the iPhone too, where it allows."""
+        if not self.subscribed or self.control_path is None:
+            print("[ANCS] Not connected to the iPhone; its notifications are left as they are",
+                  flush=True)
+            return
+        unknown = set()
+        for notification_id in notification_ids:
+            uid, key = self.find_uid(notification_id)
+            if uid is not None:
+                self.perform_negative_action(uid)
+            elif key is not None:
+                unknown.add(key)
+        if unknown:
+            # Sent in an earlier connection, so this one has another uid for it, if the iPhone
+            # still has it at all: read the older notifications to find out.
+            self.pending_clear |= unknown
+            self.start_lookup()
+
+    def perform_negative_action(self, uid):
+        flags = self.uid_flags.get(uid)
+        if flags is None or not flags & FLAG_NEGATIVE_ACTION:
+            print(f"[ANCS] The iPhone offers no way to clear notification uid={uid}", flush=True)
+            return
+        try:
+            request = perform_action_request(uid, ACTION_NEGATIVE)
+        except ValueError:
+            return
+        print(f"[ANCS] Clearing notification uid={uid} on the iPhone", flush=True)
+        self.write_control_point(request, self.on_action_error)
+
+    def on_action_error(self, error):
+        # Nothing else depends on this: the notification simply stays on the iPhone.
+        print("[ANCS] The iPhone did not clear a notification:", error, file=sys.stderr, flush=True)
+
+    def start_lookup(self):
+        waiting = sorted((uid for uid in self.preexisting
+                          if uid not in self.indexed and uid not in self.lookup_uids), reverse=True)
+        for uid in waiting[:LOOKUP_LIMIT]:
+            self.lookups.append((uid, False))
+            self.lookup_uids.add(uid)
+        self.end_lookup_if_done()
+        self.next_request()
+
+    def finish_lookup(self, uid, attributes):
+        self.indexed.add(uid)
+        if uid in self.removed:
+            return
+        key = notification_key(attributes)
+        if key is None:
+            return
+        self.uid_by_key[key] = uid
+        if key in self.pending_clear:
+            self.pending_clear.discard(key)
+            self.perform_negative_action(uid)
+
+    def end_lookup_if_done(self):
+        """Gives up on clearing what was not found once there is nothing left to read."""
+        if self.pending_clear and not self.lookup_uids:
+            print(f"[ANCS] {len(self.pending_clear)} cleared notification(s) are not on the iPhone "
+                  "any more", flush=True)
+            self.pending_clear.clear()
 
 
 def main():

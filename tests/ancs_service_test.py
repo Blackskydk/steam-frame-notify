@@ -123,6 +123,8 @@ class FakeBridge:
         self.loop = None
         self.started = self.stopped = False
         self.start_error = None
+        self.seen = None
+        self.cleared = []
         FakeBridge.instances.append(self)
 
     def start(self):
@@ -132,6 +134,9 @@ class FakeBridge:
 
     def stop(self):
         self.stopped = True
+
+    def clear_on_phone(self, ids):
+        self.cleared.append(list(ids))
 
 
 class FakePair:
@@ -594,6 +599,39 @@ class ForgetAndCommandTests(ServiceTestCase):
                 self.command(name)
         self.service.handle_line('{"command":"status","extra":5}')  # str lines and numbers are fine
         self.assertEqual(self.events[-1]["state"], "unpaired")
+
+    def test_notifications_cleared_on_the_frame_are_cleared_on_the_iphone(self):
+        self.build(device(PHONE, "iPhone"), phone=(PHONE, "iPhone")).start()
+        bridge = FakeBridge.instances[0]
+        self.command("clear_notifications", ids="ancs-abc,other-1,,ancs-def")
+        self.assertEqual(bridge.cleared, [["ancs-abc", "ancs-def"]])   # only what the bridge made
+        self.command("clear_notifications", ids="nothing,else")
+        self.command("clear_notifications", ids="")
+        self.command("clear_notifications")
+        self.assertEqual(len(bridge.cleared), 1)
+        self.command("clear_notifications", ids=",".join(f"ancs-{number}" for number in range(500)))
+        self.assertEqual(len(bridge.cleared[-1]), ancs_service.MAXIMUM_CLEARED)
+
+    def test_clearing_without_a_phone_does_nothing(self):
+        self.build().start()
+        shown = len(self.events)
+        self.command("clear_notifications", ids="ancs-abc")
+        self.assertEqual(len(self.events), shown)
+
+    def test_every_bridge_shares_the_list_of_what_was_already_sent(self):
+        self.build(device(PHONE, "iPhone"), phone=(PHONE, "iPhone")).start()
+        first = FakeBridge.instances[0]
+        self.assertIs(first.seen, self.service.seen)
+        self.assertEqual(self.service.seen.path, os.path.join(self.directory.name,
+                                                              "seen_notifications.json"))
+        self.service.seen.add("abc")
+        first.loop.quit()                                         # the bridge gave up; a new one starts
+        self.glib.fire(next(iter(self.glib.timers)))
+        self.assertEqual(len(FakeBridge.instances), 2)
+        self.assertIs(FakeBridge.instances[-1].seen, self.service.seen)
+        rebuilt = Service(self.bus, self.glib, self.dbus, "/x.sock", self.config,
+                          self.events.append, bridge_factory=FakeBridge, pair_factory=FakePair)
+        self.assertIn("abc", rebuilt.seen)                        # and it survives a restart
 
     def test_quit_and_a_closed_stdin_stop_the_loop(self):
         self.build().start()

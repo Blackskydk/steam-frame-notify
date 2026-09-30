@@ -284,6 +284,22 @@ void PhoneLink::stop() {
     pid_ = 0;
 }
 
+std::string clear_notifications_field(const std::vector<std::string>& ids) {
+    constexpr std::string_view kPrefix = "ancs-";
+    constexpr std::size_t kMaximum = 200;
+    std::string joined;
+    std::size_t count = 0;
+    for (const auto& id : ids) {
+        // Ids are told apart by the commas between them, so one that holds a comma cannot be sent.
+        if (id.compare(0, kPrefix.size(), kPrefix) != 0 || id.find(',') != std::string::npos) continue;
+        if (count == kMaximum) break;
+        if (count != 0U) joined += ',';
+        joined += id;
+        ++count;
+    }
+    return joined;
+}
+
 std::string find_helper_script() {
     namespace fs = std::filesystem;
     std::error_code error;

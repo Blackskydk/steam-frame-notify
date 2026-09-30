@@ -8,14 +8,16 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import struct
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 
-from ancs_protocol import (AppAttributeResponse, AttributeResponse, SERVICE_UUID,
-                           app_attributes_request, attribute_request, parse_event)
+from ancs_protocol import (ACTION_NEGATIVE, AppAttributeResponse, AttributeResponse, SERVICE_UUID,
+                           SeenNotifications, app_attributes_request, attribute_request,
+                           notification_key, parse_event, perform_action_request)
 from ancs_bridge import (ADAPTER, AGENT_MANAGER, AGENT_PATH, ADVERTISING_MANAGER,
                          CHARACTERISTIC, DEVICE, OBJECT_MANAGER, PROPERTIES, REJECTED, SERVICE,
                          AdapterProblem, Bridge, PairSession, diagnose_device, format_passkey,
@@ -63,9 +65,12 @@ class ProtocolTests(unittest.TestCase):
         bridge.queued = set()
         bridge.removed = set()
         bridge.active = None
+        bridge.init_tracking()
         bridge.next_request = lambda: None
         bridge.on_event(struct.pack("<BBBBI", 0, 4, 0, 0, 10))
         self.assertEqual(len(bridge.queue), 0)
+        # Not shown, but remembered: clearing it on the iPhone later needs its uid and flags.
+        self.assertEqual((bridge.preexisting, bridge.uid_flags), ({10}, {10: 4}))
         bridge.on_event(struct.pack("<BBBBI", 0, 1, 0, 0, 11))
         self.assertEqual(list(bridge.queue), [(11, True)])
         bridge.on_event(struct.pack("<BBBBI", 2, 0, 0, 0, 11))
@@ -344,30 +349,77 @@ class RecordingGLib:
             self.timers.pop(source_id, None)
 
 
+def tracked_bridge():
+    """A Bridge without Bluetooth, for driving the notification flow by hand."""
+    bridge = Bridge.__new__(Bridge)
+    bridge.glib = RecordingGLib()
+    bridge.queue = deque()
+    bridge.queued = set()
+    bridge.removed = set()
+    bridge.active = None
+    bridge.response = None
+    bridge.timeout_id = None
+    bridge.hold_timer_id = None
+    bridge.pending_attributes = None
+    bridge.app_names = {}
+    bridge.subscribed = True
+    bridge.control_path = "control"
+    bridge.session = "0123456789ab"
+    bridge.socket_path = "unused"
+    bridge.failed = False
+    bridge.loop = None
+    bridge.init_tracking()
+    bridge.writes = []
+    bridge.handlers = []
+    bridge.forwarded = []
+
+    def write_control_point(request, error_handler=None):
+        bridge.writes.append(bytes(request))
+        bridge.handlers.append(error_handler)
+
+    bridge.write_control_point = write_control_point
+    bridge.forward = lambda uid, silent, attributes: bridge.forwarded.append(
+        (uid, silent, dict(attributes)))
+    return bridge
+
+
+def capture_forward(bridge, attributes, silent=False, uid=5, unavailable=False):
+    """Runs the real Bridge.forward against a fake socket and returns the events it sent."""
+    sent = []
+
+    class FakeSocket:
+        def __init__(self, *_arguments):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_arguments):
+            return False
+
+        def settimeout(self, _seconds):
+            pass
+
+        def connect(self, _path):
+            if unavailable:
+                raise OSError("no socket")
+
+        def sendall(self, data):
+            sent.append(data)
+
+    # A stand-in for the whole module: Windows has no AF_UNIX to look up.
+    fake_socket_module = SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=FakeSocket)
+    with patch("ancs_bridge.socket", fake_socket_module), redirect_stdout(StringIO()), \
+            redirect_stderr(StringIO()):
+        Bridge.forward(bridge, uid, silent, attributes)
+    return [json.loads(data.decode("utf-8")) for data in sent]
+
+
 class AppNameTests(unittest.TestCase):
     APP = "com.apple.MobileSMS"
 
     def bridge(self):
-        bridge = Bridge.__new__(Bridge)
-        bridge.glib = RecordingGLib()
-        bridge.queue = deque()
-        bridge.queued = set()
-        bridge.removed = set()
-        bridge.active = None
-        bridge.response = None
-        bridge.timeout_id = None
-        bridge.hold_timer_id = None
-        bridge.pending_attributes = None
-        bridge.app_names = {}
-        bridge.subscribed = True
-        bridge.failed = False
-        bridge.loop = None
-        bridge.writes = []
-        bridge.forwarded = []
-        bridge.write_control_point = lambda request: bridge.writes.append(bytes(request))
-        bridge.forward = lambda uid, silent, attributes: bridge.forwarded.append(
-            (uid, silent, dict(attributes)))
-        return bridge
+        return tracked_bridge()
 
     def begin(self, bridge, uid, silent=False):
         bridge.active = (uid, silent)
@@ -511,33 +563,7 @@ class AppNameTests(unittest.TestCase):
         self.assertEqual(bridge.app_names[self.APP], "")         # names survive a reconnect
 
     def sent_event(self, bridge, attributes, silent=False):
-        sent = []
-
-        class FakeSocket:
-            def __init__(self, *_arguments):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_arguments):
-                return False
-
-            def settimeout(self, _seconds):
-                pass
-
-            def connect(self, _path):
-                pass
-
-            def sendall(self, data):
-                sent.append(data)
-
-        # A stand-in for the whole module: Windows has no AF_UNIX to look up.
-        fake_socket_module = SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=FakeSocket)
-        real_forward = Bridge.forward
-        with patch("ancs_bridge.socket", fake_socket_module), redirect_stdout(StringIO()):
-            real_forward(bridge, 5, silent, attributes)
-        return json.loads(sent[0].decode("utf-8"))
+        return capture_forward(bridge, attributes, silent)[0]
 
     def test_forwarded_event_carries_the_friendly_name_and_identifier(self):
         bridge = self.bridge()
@@ -566,6 +592,355 @@ class AppNameTests(unittest.TestCase):
         event = self.sent_event(bridge, {0: "", 1: "", 2: "", 3: "", 5: ""})
         self.assertEqual((event["app"], event["title"]), ("iPhone", "iPhone"))
         self.assertNotIn("app_id", event)
+
+
+ATTRIBUTES = {0: "com.apple.MobileSMS", 1: "Jane", 2: "", 3: "Hello", 5: "20260929T170200"}
+
+
+def key_for(title, message, app="com.apple.MobileSMS"):
+    return notification_key(AttributeResponse(1).feed(notification_response(1, app, title, message)))
+
+
+class NotificationKeyTests(unittest.TestCase):
+    def test_the_key_is_the_same_every_time_and_changes_with_the_notification(self):
+        key = notification_key(ATTRIBUTES)
+        self.assertRegex(key, "^[0-9a-f]{24}$")
+        self.assertEqual(notification_key(dict(ATTRIBUTES)), key)
+        for attribute_id, other in ((0, "com.apple.mobilemail"), (1, "Joe"), (2, "Re:"),
+                                    (3, "Bye"), (5, "20260929T170201")):
+            self.assertNotEqual(notification_key({**ATTRIBUTES, attribute_id: other}), key,
+                                attribute_id)
+
+    def test_neighbouring_fields_do_not_run_together(self):
+        self.assertNotEqual(notification_key({**ATTRIBUTES, 1: "ab", 2: "c"}),
+                            notification_key({**ATTRIBUTES, 1: "a", 2: "bc"}))
+
+    def test_without_a_date_there_is_no_key(self):
+        self.assertIsNone(notification_key({**ATTRIBUTES, 5: ""}))
+        self.assertIsNone(notification_key({0: "com.apple.MobileSMS", 1: "Jane"}))
+
+    def test_text_that_is_not_valid_unicode_still_gets_a_key(self):
+        self.assertRegex(notification_key({**ATTRIBUTES, 1: chr(0xD800)}), "^[0-9a-f]{24}$")
+
+    def test_the_clear_request_has_the_layout_ancs_defines(self):
+        self.assertEqual(perform_action_request(0x01020304, ACTION_NEGATIVE),
+                         bytes((2, 4, 3, 2, 1, 1)))
+        self.assertEqual(perform_action_request(1, 0), bytes((2, 1, 0, 0, 0, 0)))
+        for uid, action in ((-1, 1), (2 ** 32, 1), (1, 2), (1, 255)):
+            with self.assertRaises(ValueError):
+                perform_action_request(uid, action)
+
+
+class SeenNotificationsTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "state", "seen.json")
+        self.now = 1_000_000.0
+
+    def seen(self, path="default"):
+        return SeenNotifications(self.path if path == "default" else path, clock=lambda: self.now)
+
+    def test_what_was_sent_is_remembered_across_restarts(self):
+        seen = self.seen()
+        self.assertNotIn("a", seen)
+        seen.add("a")
+        restarted = self.seen()
+        self.assertIn("a", restarted)
+        self.assertEqual(len(restarted), 1)
+        self.assertEqual(os.listdir(os.path.dirname(self.path)), ["seen.json"])   # no stray .tmp
+
+    def test_the_file_is_private(self):
+        if os.name != "posix":
+            self.skipTest("file modes only mean something on Linux")
+        self.seen().add("a")
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.dirname(self.path)).st_mode & 0o777, 0o700)
+
+    def test_a_damaged_file_is_treated_as_empty_and_then_replaced(self):
+        os.makedirs(os.path.dirname(self.path))
+        for text, expected in (("", set()), ("{", set()), ("[]", set()), ("null", set()),
+                               ('{"keys": []}', set()),
+                               ('{"keys": {"a": "x", "b": true, "c": 5, "d": null}}', {"c"})):
+            with open(self.path, "w", encoding="utf-8") as stream:
+                stream.write(text)
+            self.assertEqual(set(self.seen().keys), expected, text)
+        seen = self.seen()
+        seen.add("z")
+        self.assertIn("z", self.seen())
+
+    def test_old_entries_are_forgotten(self):
+        seen = self.seen()
+        seen.add("old")
+        self.now += 91 * 86400
+        seen.add("new")
+        restarted = self.seen()
+        self.assertNotIn("old", restarted)
+        self.assertIn("new", restarted)
+
+    def test_the_list_stays_bounded_and_keeps_the_newest(self):
+        seen = self.seen(None)
+        with patch.object(SeenNotifications, "MAXIMUM", 3):
+            for name in "abcde":
+                self.now += 1
+                seen.add(name)
+        self.assertEqual(set(seen.keys), {"c", "d", "e"})
+
+    def test_without_a_file_it_is_remembered_for_this_run_only(self):
+        seen = self.seen(None)
+        seen.add("a")
+        self.assertIn("a", seen)
+
+    def test_a_disk_problem_is_reported_once_and_loses_nothing_for_this_run(self):
+        blocker = os.path.join(self.directory.name, "blocker")
+        open(blocker, "w").close()                                 # a file where the folder should be
+        seen = self.seen(os.path.join(blocker, "seen.json"))
+        with redirect_stderr(StringIO()) as log:
+            seen.add("a")
+            seen.add("b")
+        self.assertIn("a", seen)
+        self.assertIn("b", seen)
+        self.assertEqual(log.getvalue().count("Could not save"), 1)
+
+
+class StableIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "seen.json")
+
+    def bridge(self, seen=None, session="0123456789ab"):
+        bridge = tracked_bridge()
+        bridge.session = session
+        bridge.seen = seen
+        return bridge
+
+    def test_the_id_is_the_same_on_every_connection(self):
+        first = capture_forward(self.bridge(session="aaaaaaaaaaaa"), ATTRIBUTES, uid=5)
+        second = capture_forward(self.bridge(session="bbbbbbbbbbbb"), ATTRIBUTES, uid=99)
+        self.assertEqual(first[0]["id"], second[0]["id"])
+        self.assertEqual(first[0]["id"], "ancs-" + notification_key(ATTRIBUTES))
+
+    def test_a_notification_that_was_sent_is_not_sent_again_even_after_a_restart(self):
+        bridge = self.bridge(SeenNotifications(self.path))
+        self.assertEqual(len(capture_forward(bridge, ATTRIBUTES)), 1)
+        self.assertEqual(capture_forward(bridge, ATTRIBUTES, uid=6), [])
+        restarted = self.bridge(SeenNotifications(self.path), session="cccccccccccc")
+        self.assertEqual(capture_forward(restarted, ATTRIBUTES, uid=7), [])
+        newer = {**ATTRIBUTES, 3: "Again", 5: "20260929T170300"}
+        self.assertEqual(len(capture_forward(restarted, newer, uid=8)), 1)
+        # It is not shown, but it is still found by its key, for clearing it on the iPhone later.
+        self.assertEqual(restarted.uid_by_key[notification_key(ATTRIBUTES)], 7)
+
+    def test_a_notification_is_remembered_only_once_it_has_really_been_sent(self):
+        seen = SeenNotifications(self.path)
+        bridge = self.bridge(seen)
+        self.assertEqual(capture_forward(bridge, ATTRIBUTES, unavailable=True), [])
+        self.assertNotIn(notification_key(ATTRIBUTES), seen)
+        self.assertEqual(len(capture_forward(bridge, ATTRIBUTES)), 1)      # so it is sent on retry
+        self.assertIn(notification_key(ATTRIBUTES), seen)
+
+    def test_without_a_date_the_id_only_lasts_one_connection_and_is_never_remembered(self):
+        attributes = {**ATTRIBUTES, 5: ""}
+        seen = SeenNotifications(self.path)
+        bridge = self.bridge(seen, session="dddddddddddd")
+        first = capture_forward(bridge, attributes, uid=5)
+        second = capture_forward(bridge, attributes, uid=5)
+        self.assertEqual(first[0]["id"], "ancs-dddddddddddd-5")
+        self.assertEqual(len(second), 1)
+        self.assertEqual(len(seen), 0)
+
+    def test_without_a_store_everything_is_sent(self):
+        bridge = self.bridge(None)
+        self.assertEqual(len(capture_forward(bridge, ATTRIBUTES)), 1)
+        self.assertEqual(len(capture_forward(bridge, ATTRIBUTES)), 1)
+
+
+class ClearOnPhoneTests(unittest.TestCase):
+    APP = "com.apple.MobileSMS"
+    SESSION = "0123456789ab"
+
+    def setUp(self):
+        self.bridge = tracked_bridge()
+        self.bridge.app_names[self.APP] = "Messages"     # no app-name request in the way
+        self.sent = []
+        self.bridge.forward = lambda uid, silent, attributes: self.sent.extend(
+            capture_forward(self.bridge, attributes, silent, uid))
+
+    def event(self, kind, flags, uid):
+        with redirect_stdout(StringIO()):
+            self.bridge.on_event(struct.pack("<BBBBI", kind, flags, 0, 0, uid))
+
+    def arrive(self, uid, title, message, flags=0x10):
+        """A notification that arrives while connected, read in full and sent to the Frame."""
+        self.event(0, flags, uid)
+        with redirect_stdout(StringIO()):
+            self.bridge.on_data(notification_response(uid, self.APP, title, message))
+        return self.sent[-1]["id"]
+
+    def clear(self, ids):
+        with redirect_stdout(StringIO()) as log:
+            self.bridge.clear_on_phone(ids)
+        return log.getvalue()
+
+    def actions(self):
+        return [write for write in self.bridge.writes if write[0] == 2]
+
+    def test_a_notification_from_this_connection_is_cleared_by_its_id(self):
+        notification_id = self.arrive(10, "Jane", "Hello")
+        self.assertEqual(self.bridge.writes, [attribute_request(10)])
+        self.clear([notification_id])
+        self.assertEqual(self.actions(), [perform_action_request(10, ACTION_NEGATIVE)])
+
+    def test_a_refused_clear_only_leaves_a_log_line(self):
+        self.clear([self.arrive(10, "Jane", "Hello")])
+        handler = self.bridge.handlers[-1]
+        self.assertEqual(handler, self.bridge.on_action_error)
+        with redirect_stderr(StringIO()) as log:
+            handler("boom")
+        self.assertIn("did not clear", log.getvalue())
+        self.assertFalse(self.bridge.failed)
+
+    def test_a_notification_the_iphone_cannot_clear_is_left_alone(self):
+        notification_id = self.arrive(10, "Jane", "Hello", flags=0)
+        message = self.clear([notification_id])
+        self.assertEqual(self.actions(), [])
+        self.assertIn("no way to clear", message)
+
+    def test_only_ids_this_bridge_handed_out_are_understood(self):
+        self.arrive(10, "Jane", "Hello")
+        for name in ("ancs-" + "0" * 24, "ancs-ffffffffffff-10", "ancs-", "ancs-zz", "other-10",
+                     "ancs-" + self.SESSION + "-99999999999", "ancs-" + self.SESSION + "-x", ""):
+            self.clear([name])
+        self.assertEqual(self.actions(), [])
+        self.assertEqual(self.bridge.pending_clear, set())          # and nothing is left waiting
+        self.clear(["ancs-" + self.SESSION + "-10"])                  # an id without a key, same connection
+        self.assertEqual(self.actions(), [perform_action_request(10, ACTION_NEGATIVE)])
+
+    def test_nothing_is_done_while_not_connected(self):
+        notification_id = self.arrive(10, "Jane", "Hello")
+        self.bridge.subscribed = False
+        self.assertIn("Not connected", self.clear([notification_id]))
+        self.assertEqual(self.actions(), [])
+
+    def test_clearing_does_not_disturb_a_request_in_flight(self):
+        notification_id = self.arrive(10, "Jane", "Hello")
+        self.event(0, 0, 11)                                          # the next one is being read
+        response = self.bridge.response
+        self.clear([notification_id])
+        self.assertEqual(self.actions(), [perform_action_request(10, ACTION_NEGATIVE)])
+        self.assertEqual(self.bridge.active, (11, False))
+        self.assertIs(self.bridge.response, response)
+
+    def test_an_older_notification_is_found_by_reading_what_the_iphone_already_had(self):
+        self.event(0, 0x04 | 0x10, 20)                                # there before this connection
+        self.event(0, 0x04 | 0x10, 21)
+        self.assertEqual((self.bridge.preexisting, self.bridge.writes), ({20, 21}, []))
+        self.clear(["ancs-" + key_for("Jane", "Earlier")])            # sent in an earlier connection
+        self.assertEqual(self.bridge.writes, [attribute_request(21)])   # newest first
+        with redirect_stdout(StringIO()):
+            self.bridge.on_data(notification_response(21, self.APP, "Other", "Something"))
+        self.assertEqual(self.bridge.writes[-1], attribute_request(20))
+        with redirect_stdout(StringIO()):
+            self.bridge.on_data(notification_response(20, self.APP, "Jane", "Earlier"))
+        self.assertEqual(self.bridge.writes[-1], perform_action_request(20, ACTION_NEGATIVE))
+        self.assertEqual((self.bridge.pending_clear, self.bridge.lookup_uids), (set(), set()))
+        self.assertIsNone(self.bridge.active)
+        self.assertEqual(self.sent, [])                               # reading them shows nothing
+        self.assertTrue(all(write[0] in (0, 2) for write in self.bridge.writes))   # no app names
+
+    def test_the_search_ends_when_the_iphone_no_longer_has_the_notification(self):
+        self.event(0, 0x04 | 0x10, 20)
+        wanted = "ancs-" + key_for("Jane", "Gone")
+        message = self.clear([wanted])
+        with redirect_stdout(StringIO()) as log:
+            self.bridge.on_data(notification_response(20, self.APP, "Other", "Something"))
+        self.assertIn("not on the iPhone", message + log.getvalue())
+        self.assertEqual((self.bridge.pending_clear, self.bridge.lookup_uids), (set(), set()))
+        self.assertEqual(self.actions(), [])
+        reads = len(self.bridge.writes)
+        self.clear([wanted])                                          # nothing new to read this time
+        self.assertEqual((len(self.bridge.writes), self.bridge.pending_clear), (reads, set()))
+
+    def test_new_notifications_are_read_before_the_search(self):
+        self.event(0, 0x04 | 0x10, 20)
+        self.event(0, 0x04 | 0x10, 21)
+        self.clear(["ancs-" + key_for("Jane", "Earlier")])
+        self.event(0, 0, 30)                                          # arrives during the search
+        with redirect_stdout(StringIO()):
+            self.bridge.on_data(notification_response(21, self.APP, "Other", "Something"))
+        self.assertEqual(self.bridge.active, (30, False))
+        with redirect_stdout(StringIO()):
+            self.bridge.on_data(notification_response(30, self.APP, "Now", "Fresh"))
+        self.assertEqual([item["title"] for item in self.sent], ["Now"])
+        self.assertEqual(self.bridge.active, (20, False))
+
+    def test_a_notification_removed_from_the_iphone_leaves_the_search(self):
+        self.event(0, 0x04 | 0x10, 20)
+        self.event(0, 0x04 | 0x10, 21)
+        self.clear(["ancs-" + key_for("Jane", "Earlier")])
+        self.event(2, 0, 20)
+        self.assertEqual((list(self.bridge.lookups), self.bridge.lookup_uids), ([], {21}))
+        with redirect_stdout(StringIO()):
+            self.bridge.on_data(notification_response(21, self.APP, "Other", "Something"))
+        self.assertEqual((self.bridge.pending_clear, self.bridge.lookup_uids), (set(), set()))
+        self.assertEqual(self.bridge.writes, [attribute_request(21)])
+
+    def test_a_notification_cleared_on_the_iphone_is_forgotten(self):
+        notification_id = self.arrive(10, "Jane", "Hello")
+        self.event(2, 0, 10)
+        self.assertEqual((self.bridge.uid_flags, self.bridge.uid_by_key), ({}, {}))
+        self.clear([notification_id])
+        self.assertEqual(self.actions(), [])
+
+    def test_everything_replayed_after_a_restart_stays_away(self):
+        """The iPhone lists its unread notifications again on every start; the Frame has them."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "seen.json")
+            self.bridge.seen = SeenNotifications(path)
+            for uid, (title, message) in enumerate((("Jane", "One"), ("Joe", "Two"), ("Ann", "Three")), 10):
+                self.arrive(uid, title, message)
+            self.assertEqual([item["message"] for item in self.sent], ["One", "Two", "Three"])
+
+            # The next start: a new program, a new connection, other uids, the same notifications.
+            self.bridge = tracked_bridge()
+            self.bridge.app_names[self.APP] = "Messages"
+            self.bridge.seen = SeenNotifications(path)
+            self.bridge.forward = lambda uid, silent, attributes: self.sent.extend(
+                capture_forward(self.bridge, attributes, silent, uid))
+            self.sent.clear()
+            for uid, (title, message) in enumerate((("Jane", "One"), ("Joe", "Two"), ("Ann", "Three")), 500):
+                self.event(0, 0x10, uid)
+                with redirect_stdout(StringIO()):
+                    self.bridge.on_data(notification_response(uid, self.APP, title, message))
+            self.assertEqual(self.sent, [])
+            newer = notification_response(503, self.APP, "Jane", "Four").replace(
+                b"20260929T170200", b"20260929T171500")
+            self.event(0, 0x10, 503)
+            with redirect_stdout(StringIO()):
+                self.bridge.on_data(newer)
+            self.assertEqual([item["message"] for item in self.sent], ["Four"])   # what is new still comes
+
+            # And they are still known by their new uids, so clearing them clears them on the iPhone.
+            self.clear(["ancs-" + key_for("Joe", "Two")])
+            self.assertEqual(self.actions(), [perform_action_request(501, ACTION_NEGATIVE)])
+
+    def test_a_new_connection_forgets_every_uid(self):
+        notification_id = self.arrive(10, "Jane", "Hello")
+        self.event(0, 0x04 | 0x10, 20)
+        self.clear(["ancs-" + key_for("Jane", "Earlier")])
+        self.bridge.subscribing = False
+        self.bridge.service_path = self.bridge.data_path = self.bridge.source_path = "x"
+        self.bridge.reported_unavailable = False
+        with redirect_stdout(StringIO()):
+            self.bridge.reset_session()
+        self.assertNotEqual(self.bridge.session, self.SESSION)
+        self.assertEqual((self.bridge.uid_flags, self.bridge.uid_by_key, self.bridge.preexisting,
+                          self.bridge.pending_clear, list(self.bridge.lookups),
+                          self.bridge.lookup_uids), ({}, {}, set(), set(), [], set()))
+        self.bridge.subscribed = True
+        self.clear([notification_id])
+        self.assertEqual(self.actions(), [])
 
 
 class HookRecorder:

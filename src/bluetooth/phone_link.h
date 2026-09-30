@@ -89,6 +89,10 @@ private:
     std::chrono::milliseconds terminate_timeout_{1000};
 };
 
+// The `ids` field of the helper's "clear_notifications" command: the ids in `ids` that the helper
+// made (they start with "ancs-"), joined with commas, at most 200 of them. Empty when none is.
+[[nodiscard]] std::string clear_notifications_field(const std::vector<std::string>& ids);
+
 // The script that implements the helper, found next to the executable or in the source tree; empty
 // when there is none. FRAME_NOTIFY_BRIDGE overrides the search with an explicit path.
 [[nodiscard]] std::string find_helper_script();

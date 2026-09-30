@@ -87,7 +87,9 @@ starts SteamVR.
 
 The Bluetooth helper (`scripts/ancs_bridge.py --service`, started and stopped by Frame Notify)
 talks only to the one phone you paired through the panel, which it remembers in `phone.json` next
-to the notification history. It opens a pairing window (a temporary BlueZ pairing agent, a
+to the notification history. It also keeps `seen_notifications.json` there: a short fingerprint
+(a hash) and a time for each notification already sent to the Frame, for 90 days, and no text.
+It opens a pairing window (a temporary BlueZ pairing agent, a
 temporary advertisement named "Frame", and the adapter's `Pairable` setting for five minutes) only
 while you have pressed **Pair an iPhone**, and puts everything back afterwards. The only pairings
 it removes are one you chose to remove or forget by pressing that phone's button, and a pairing
@@ -169,7 +171,13 @@ collapses it. The round **×** on a card clears that notification and **Clear al
 clears every visible one. The gear in the header opens the settings. The SteamVR control bar below
 the panel can be grabbed to move the window and includes a close button; using close removes the
 dashboard entry until SteamVR restarts, and Frame Notify itself keeps running.
-Clearing is persisted locally but does not dismiss the corresponding notification on the phone.
+Clearing is remembered, and it reaches the iPhone. A notification is sent to the Frame once, so one
+you cleared does not come back the next time Frame Notify starts, even if it is still unread on the
+iPhone. While the iPhone is connected, **×** and **Clear all** also clear the notification there,
+where iOS offers a way to (most notifications have a "Clear" button on the iPhone). Set
+`FRAME_NOTIFY_KEEP_ON_PHONE=1` to leave the iPhone alone. The first start after updating to a
+version with this memory shows the iPhone's unread notifications once more, because there is no
+record yet of what was sent before; clear them and they stay cleared.
 
 The panel needs the bundled Inter fonts. The build copies them to `build-frame/fonts/`; the program
 also looks in `src/ui/fonts/` of the source tree, or in `$FRAME_NOTIFY_FONT_DIR` if you set it. If
@@ -299,6 +307,7 @@ Frame's Python tooling; the panel reports it when they are missing. Settings, al
 | `FRAME_NOTIFY_PANEL_WIDTH=1.5` | Width of the dashboard panel in metres (0.8 to 4; the height follows). |
 | `FRAME_NOTIFY_REPO=owner/name` | The GitHub repository that Check for updates asks about (default: this one). |
 | `FRAME_NOTIFY_QUIET_NO_TOAST=1` | No toast for notifications the iPhone flags as silent (they still go in the list). |
+| `FRAME_NOTIFY_KEEP_ON_PHONE=1` | Clearing a notification here leaves it on the iPhone (by default it is cleared there too). |
 
 The pairing screens hang from the top of the panel, so their buttons stay high in the dashboard.
 Like the notification list, a screen can also be dragged up (hold the trigger and pull) if the

@@ -168,6 +168,15 @@ std::vector<frame_notify::ui::HistoryNotification> make_dashboard_history(
     return history;
 }
 
+// The ids of the notifications the panel shows, that is, the ones not yet cleared.
+std::vector<std::string> shown_ids(const frame_notify::history::Store& store) {
+    std::vector<std::string> ids;
+    for (const auto& notification : store.notifications()) {
+        if (!notification.dismissed) ids.push_back(notification.id);
+    }
+    return ids;
+}
+
 int retention_setting(const char* name, int fallback, int minimum, int maximum) {
     const char* value = std::getenv(name);
     if (value == nullptr || *value == '\0') return fallback;
@@ -187,6 +196,7 @@ struct Options {
     bool diagnostics_only = false;
     bool native_notification = false;
     bool use_bluetooth = true;
+    bool clear_on_phone = true;   // clearing a notification here clears it on the iPhone too
 };
 
 // How a run of the program ends: for good, or by starting over.
@@ -335,6 +345,17 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
         }
     };
 
+    // What is cleared here is cleared on the iPhone too, where the iPhone allows it. The helper
+    // only ever sees notifications it sent; with no helper running the iPhone simply keeps them
+    // (and the Frame does not show them again: the helper remembers what it has sent).
+    const auto clear_on_phone = [&](const std::vector<std::string>& ids) {
+        if (!options.clear_on_phone || !options.use_bluetooth) return;
+        const auto field = bluetooth::clear_notifications_field(ids);
+        if (!field.empty() && phone_link.send("clear_notifications", {{"ids", field}})) {
+            std::cout << "[Bluetooth] Asked the iPhone to clear what was cleared here\n";
+        }
+    };
+
     system::Autostart autostart(system::Autostart::default_options());
     ui::SettingsInfo settings = read_settings(autostart);
     system::UpdateChecker updates({FRAME_NOTIFY_VERSION, releases_url()});
@@ -448,19 +469,27 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
                         history_changed = true;
                     }
                     break;
-                case DashboardActionType::Dismiss:
+                case DashboardActionType::Dismiss: {
+                    const auto shown = shown_ids(history);
+                    const bool was_shown = std::find(shown.begin(), shown.end(),
+                                                     action.notification_id) != shown.end();
                     if (history.dismiss(action.notification_id)) {
                         std::cout << "[History] Cleared local notification id="
                                   << action.notification_id << '\n';
                         history_changed = true;
+                        if (was_shown) clear_on_phone({action.notification_id});
                     }
                     break;
-                case DashboardActionType::ClearAll:
+                }
+                case DashboardActionType::ClearAll: {
+                    const auto shown = shown_ids(history);
                     if (const auto count = history.dismiss_all(); count != 0U) {
                         std::cout << "[History] Cleared " << count << " local notification(s)\n";
                         history_changed = true;
+                        clear_on_phone(shown);
                     }
                     break;
+                }
                 case DashboardActionType::Exit:
                     // The close button on the panel's control bar. The program itself keeps
                     // running; only the dashboard entry goes, until SteamVR starts again.
@@ -566,6 +595,7 @@ int main(int argc, char* argv[]) {
 
     Options options;
     options.use_bluetooth = !environment_flag("FRAME_NOTIFY_NO_BLUETOOTH");
+    options.clear_on_phone = !environment_flag("FRAME_NOTIFY_KEEP_ON_PHONE");
     std::vector<std::string> arguments;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};

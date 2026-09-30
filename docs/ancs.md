@@ -154,10 +154,33 @@ stops on a protocol timeout so delayed fragments cannot be mistaken for another 
 - New iPhone notifications are forwarded; notifications flagged *pre-existing* are skipped to
   avoid replaying old alerts after reconnect. Modified and removed ANCS events do not rewrite
   the persistent local history.
+- Every notification is forwarded at most once, however often the iPhone lists it. An ANCS UID
+  is valid only for its Bluetooth connection, so it cannot tell a notification seen before from a
+  new one. The bridge names a notification by a *key* instead: the first 24 hex digits of the
+  SHA-256 of its app identifier, title, subtitle, message and date (the date is when the iPhone
+  posted it). The forwarded ID is `ancs-<key>`, the same on every connection. The keys of what has
+  been sent are kept in `seen_notifications.json` in the state directory (keys and times only,
+  user-only permissions, at most 2000 of them and 90 days old), and a notification whose key is
+  in it is read but not forwarded again. That is why a notification cleared on the Frame stays
+  cleared even if it is still on the iPhone, and why the iPhone listing its unread notifications
+  again on every start (whatever flags it puts on them) brings nothing back. A key is added only
+  after the notification has reached Frame Notify, so one that could not be delivered is sent next
+  time. A notification without a date has no key: it gets `ancs-<connection>-<uid>` and is not
+  remembered.
+- Clearing on the iPhone: when a card is cleared on the Frame (or **Clear all** is used), Frame
+  Notify sends the helper `{"command":"clear_notifications","ids":"ancs-<key>,..."}` and the
+  bridge writes ANCS *Perform Notification Action* with the negative action, for each notification
+  whose event flags include *NegativeAction* (0x10). Most notifications have it: it is the
+  iPhone's own "Clear". For a notification seen in this connection the UID is known. For an
+  older one (sent in an earlier connection) the bridge reads the attributes of the notifications
+  the iPhone listed as pre-existing, newest first and only after anything newly arrived, until it
+  finds the one with that key; it gives up when it has read them all (at most 300) or when the
+  iPhone no longer has it. Nothing is done while the iPhone is not connected, and a notification
+  the iPhone does not allow to be cleared stays there. `FRAME_NOTIFY_KEEP_ON_PHONE=1` turns the
+  whole thing off. The other direction (clearing on the iPhone clears on the Frame) is not done.
 - Silent iPhone alerts (those the iPhone flags as low priority, for example while it is muted or
   in a Focus) are logged as such and get a SteamVR toast like the others; with
   `FRAME_NOTIFY_QUIET_NO_TOAST=1` in Frame Notify's environment they go to the history only.
-  Clearing a local card never sends an action to the iPhone.
 - After a notification's title and message arrive, the bridge asks the iPhone once per app for
   its display name (ANCS *Get App Attributes*) and remembers the answer until the bridge stops.
   Frame Notify then shows "Messages" (or "Nachrichten" on a German-language iPhone) instead of
@@ -166,8 +189,6 @@ stops on a protocol timeout so delayed fragments cannot be mistaken for another 
   the notification: it is shown under the identifier, that app is not asked about again, and the
   bridge waits three seconds before its next request so a late fragment cannot be mistaken for
   another response. Frame Notify also turns a raw identifier into a readable name on its own.
-  An ANCS notification UID is valid only for its Bluetooth session, so the bridge prefixes each ID
-  with a new session token.
 - The current history file contains notification content. Review its retention settings in the
   README before forwarding private phone alerts.
 

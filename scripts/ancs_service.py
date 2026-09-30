@@ -10,6 +10,8 @@ It talks to its parent with one JSON object per line, every value a string:
   stdin (commands)  {"command":"pair"}  pair_anyway  cancel  confirm  reject  dismiss  forget
                     power_on  retry  status  quit  and
                     {"command":"remove_conflict","address":"AA:BB:CC:DD:EE:FF"}
+                    {"command":"clear_notifications","ids":"ancs-<key>,ancs-<key>"}   clear on the
+                    iPhone what the Frame has cleared (ids as the notifications were sent)
 
 States, in the order a phone normally goes through them:
 
@@ -27,7 +29,8 @@ States, in the order a phone normally goes through them:
                                                              (stays until "dismiss")
 
 The phone that completed pairing is remembered in phone.json in Frame Notify's state directory, so
-the next start connects to it without asking. Human-readable log lines go to stderr.
+the next start connects to it without asking. The keys of the notifications already sent to the
+Frame are kept in seen_notifications.json beside it. Human-readable log lines go to stderr.
 """
 
 import json
@@ -37,7 +40,8 @@ import signal
 import sys
 
 from ancs_bridge import (ADAPTER, BLUEZ, DEVICE, OBJECT_MANAGER, PROPERTIES, AdapterProblem,
-                         Bridge, PairSession, pick_adapter)
+                         Bridge, ID_PREFIX, PairSession, pick_adapter)
+from ancs_protocol import SeenNotifications
 
 PROTOCOL_VERSION = "1"
 BRIDGE_RESTART_SECONDS = 5
@@ -46,9 +50,11 @@ REPAIR_AFTER_SECONDS = 30
 POWER_ON_SETTLE_SECONDS = 2
 MAXIMUM_LINE_BYTES = 65536
 MAXIMUM_CONFLICTS = 3
+MAXIMUM_CLEARED = 200
+SEEN_FILE = "seen_notifications.json"
 ADDRESS_PATTERN = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
 COMMANDS = ("pair", "pair_anyway", "cancel", "confirm", "reject", "remove_conflict", "dismiss",
-            "forget", "power_on", "retry", "status", "quit")
+            "forget", "power_on", "retry", "status", "clear_notifications", "quit")
 
 
 def state_directory(environ=None):
@@ -178,6 +184,8 @@ class Service:
         self.last_bridge_problem = None
         self.quiet_retry = False     # retrying a refused subscription without changing the screen
         self.loop = None
+        # What the Frame has been sent, so a notification that was cleared there stays cleared.
+        self.seen = SeenNotifications(os.path.join(config.directory, SEEN_FILE))
 
     # ---- state -------------------------------------------------------------------------------
 
@@ -242,6 +250,7 @@ class Service:
                                      self.socket_path, solicit=True)
         bridge.on_status = self.on_bridge_status
         bridge.loop = CallbackLoop(self.on_bridge_failed)
+        bridge.seen = self.seen
         self.bridge = bridge
         if not self.quiet_retry:
             self.last_bridge_problem = None
@@ -538,6 +547,14 @@ class Service:
     def cmd_status(self, _message):
         if self.current is not None:
             self.publish(self.current[0], self.current[1], force=True)
+
+    def cmd_clear_notifications(self, message):
+        """The Frame cleared these notifications (`ids`, separated by commas): clear them on the iPhone."""
+        if self.bridge is None:
+            return
+        ids = [name for name in message.get("ids", "").split(",") if name.startswith(ID_PREFIX)]
+        if ids:
+            self.bridge.clear_on_phone(ids[:MAXIMUM_CLEARED])
 
     def cmd_quit(self, _message):
         if self.loop is not None:

@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -199,6 +200,30 @@ exec sleep 30)")));
         link.retry();
         link.stop();
         EXPECT(read_file(log) == "{\"command\":\"retry\"}\n{\"command\":\"quit\"}\n");
+    }
+
+    // ---- Clearing on the iPhone: only the helper's own ids are passed on ----
+    {
+        using frame_notify::bluetooth::clear_notifications_field;
+        EXPECT(clear_notifications_field({}).empty());
+        EXPECT(clear_notifications_field({"a-1", "manual", "", "ancs"}).empty());
+        EXPECT(clear_notifications_field({"ancs-0123456789abcdef01234567"}) == "ancs-0123456789abcdef01234567");
+        EXPECT(clear_notifications_field({"ancs-a", "other-1", "ancs-b,ancs-c", "ancs-d"}) == "ancs-a,ancs-d");
+        EXPECT(clear_notifications_field({"ancs-"}) == "ancs-");               // the helper decides what is valid
+        std::vector<std::string> many;
+        for (int number = 0; number < 500; ++number) many.push_back("ancs-" + std::to_string(number));
+        const std::string capped = clear_notifications_field(many);
+        EXPECT(std::count(capped.begin(), capped.end(), ',') == 199);
+        EXPECT(capped.rfind("ancs-0,ancs-1,", 0) == 0U && capped.substr(capped.rfind(',') + 1) == "ancs-199");
+
+        const fs::path log = work / "clear.log";
+        PhoneLink link;
+        quick(link);
+        EXPECT(link.start(script("exec cat > " + quoted(log))));
+        EXPECT(link.send("clear_notifications", {{"ids", clear_notifications_field({"ancs-a", "ancs-b"})}}));
+        link.stop();
+        EXPECT(read_file(log) == "{\"command\":\"clear_notifications\",\"ids\":\"ancs-a,ancs-b\"}\n"
+                                 "{\"command\":\"quit\"}\n");
     }
 
     // ---- A helper that crashes is started again, a few times ----
