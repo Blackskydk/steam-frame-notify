@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 int main() {
@@ -75,6 +76,64 @@ int main() {
     if (three == twelve || twelve == many || three == none) {
         std::cerr << "Different unread counts must render differently\n";
         return 1;
+    }
+
+    // SteamVR shows the tile small in the dock, so the number has to be big: the badge is at least
+    // 100 pixels tall on the 256 pixel tile (it was 70), its digits are solid white ink well beyond
+    // what the old small digits had (about 350 to 560 pixels), and all of it stays on the canvas.
+    const auto is_white = [](const std::vector<std::uint8_t>& pixels, std::size_t index) {
+        return pixels[index] > 235 && pixels[index + 1] > 235 && pixels[index + 2] > 235 && pixels[index + 3] > 200;
+    };
+    for (const int count : {3, 8, 12, 88, 150}) {
+        const auto badged = frame_notify::ui::make_notification_icon(size, count);
+        std::size_t digit_ink = 0;
+        int left = static_cast<int>(size);
+        int right = -1;
+        int top = static_cast<int>(size);
+        int bottom = -1;
+        for (std::size_t index = 0; index + 3 < badged.size(); index += 4) {
+            if (is_white(badged, index) && !is_white(none, index)) ++digit_ink;
+            if (badged[index] > 220 && badged[index + 1] < 120 && badged[index + 2] < 140 && badged[index + 3] > 200) {
+                const int x = static_cast<int>((index / 4) % size);
+                const int y = static_cast<int>((index / 4) / size);
+                left = std::min(left, x);
+                right = std::max(right, x);
+                top = std::min(top, y);
+                bottom = std::max(bottom, y);
+            }
+        }
+        if (bottom - top + 1 < 100 || digit_ink < 1000) {
+            std::cerr << "The badge for " << count << " is too small to read in the dock (height "
+                      << bottom - top + 1 << ", digit ink " << digit_ink << ")\n";
+            return 1;
+        }
+        if (top < 4 || right > 250 || left < 40) {
+            std::cerr << "The badge for " << count << " is cut off or covers too much of the tile (x " << left
+                      << ".." << right << ", y " << top << ".." << bottom << ")\n";
+            return 1;
+        }
+    }
+    {   // Longer numbers make a wider badge, growing to the left from the same corner.
+        const auto width_of = [&](int count) {
+            const auto badged = frame_notify::ui::make_notification_icon(size, count);
+            int left = static_cast<int>(size);
+            int right = -1;
+            for (std::size_t index = 0; index + 3 < badged.size(); index += 4) {
+                if (badged[index] > 220 && badged[index + 1] < 120 && badged[index + 2] < 140 && badged[index + 3] > 200) {
+                    left = std::min(left, static_cast<int>((index / 4) % size));
+                    right = std::max(right, static_cast<int>((index / 4) % size));
+                }
+            }
+            return std::pair<int, int>{left, right};
+        };
+        const auto one = width_of(1);
+        const auto two = width_of(12);
+        const auto three_characters = width_of(150);
+        if (two.first >= one.first || three_characters.first >= two.first || one.second != two.second ||
+            two.second != three_characters.second) {
+            std::cerr << "The badge must grow to the left and keep its right edge\n";
+            return 1;
+        }
     }
 
     try {

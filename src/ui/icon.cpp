@@ -90,15 +90,26 @@ std::vector<std::uint8_t> make_notification_icon(std::uint32_t size, int unread_
     draw_bell(canvas, 124.0F * scale, 132.0F * scale, 118.0F * scale, {255, 255, 255, 255});
 
     if (unread_count > 0) {
-        // Unread badge with a ring that separates it from the tile.
-        canvas.fill_circle(190.0F * scale, 74.0F * scale, 42.0F * scale, {84, 64, 226, 255});
-        canvas.fill_circle(190.0F * scale, 74.0F * scale, 35.0F * scale, {255, 82, 102, 255});
+        // Unread badge. SteamVR shows the tile small in the dock, so the number has to be big: the
+        // badge fills a good part of the corner, and is a pill that grows to the left for two or
+        // three characters. A ring separates it from the tile.
         const std::string label = unread_count > 99 ? "99+" : std::to_string(unread_count);
-        const TextStyle style{(label.size() == 1U ? 46.0F : label.size() == 2U ? 38.0F : 29.0F) * scale,
+        const TextStyle style{(label.size() == 1U ? 94.0F : label.size() == 2U ? 80.0F : 64.0F) * scale,
                               FontWeight::kSemiBold, 0.0F};
-        canvas.draw_text(190.0F * scale,
-                         74.0F * scale + Typography::shared().cap_height(style) / 2.0F, label,
-                         style, {255, 255, 255, 255}, TextAlign::kCenter);
+        const float ring = 8.0F * scale;
+        const float inner_height = 104.0F * scale;
+        const float inner_width = std::max(inner_height, Typography::shared().measure(label, style) + 36.0F * scale);
+        const float outer_right = 254.0F * scale;
+        const float outer_top = 4.0F * scale;
+        const float outer_left = outer_right - (inner_width + 2.0F * ring);
+        const float outer_bottom = outer_top + inner_height + 2.0F * ring;
+        canvas.fill_rounded_rect(outer_left, outer_top, outer_right, outer_bottom,
+                                 (outer_bottom - outer_top) / 2.0F, {84, 64, 226, 255});
+        canvas.fill_rounded_rect(outer_left + ring, outer_top + ring, outer_right - ring, outer_bottom - ring,
+                                 inner_height / 2.0F, {255, 82, 102, 255});
+        canvas.draw_text((outer_left + outer_right) / 2.0F,
+                         (outer_top + outer_bottom) / 2.0F + Typography::shared().cap_height(style) / 2.0F,
+                         label, style, {255, 255, 255, 255}, TextAlign::kCenter);
     }
     return canvas.take_pixels();
 }

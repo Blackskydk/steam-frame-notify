@@ -9,7 +9,9 @@ overlay; the current version implements:
 2. A native SteamVR dashboard entry named **Phone Notifications**, created through the public
    `IVROverlay::CreateDashboardOverlay` API.
 3. A generated 256x256 RGBA bell tile uploaded with `SetOverlayRaw`, with a red badge showing the
-   number of unread notifications that updates as they arrive and are read.
+   number of unread notifications that updates as they arrive and are read. The badge is large, and
+   grows wider for two or three characters, so the number can be read when SteamVR shows the tile
+   small in its dock.
 4. A modern notification panel drawn by a small built-in software renderer: anti-aliased Inter
    typography (kerning, accented Latin letters, an emoji placeholder), rounded cards with
    per-app colours and monogram avatars, unread state, relative times, notifications grouped by
