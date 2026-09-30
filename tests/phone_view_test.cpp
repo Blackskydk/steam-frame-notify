@@ -441,6 +441,79 @@ int main() {
         const PhoneScreen available = update_screen("available", "0.2.0");
         EXPECT(mentions(available, "Version 0.2.0 is available (you have 0.1.1)") && mentions(available, "install command"));
         EXPECT(available.tone == Tone::kActive);
+        EXPECT(!std::any_of(available.buttons.begin(), available.buttons.end(),
+                            [](const PhoneScreenButton& candidate) { return candidate.id == PhoneButton::kInstallUpdate; }));
+
+        // A copy that can update itself installs the update from here, instead of sending the user
+        // off to run a command.
+        const auto install_screen = [&](std::string state, std::string install_state = {}, std::string message = {},
+                                        bool autostart = false, bool installable = true) {
+            SettingsInfo info;
+            info.version = "0.1.1";
+            info.autostart_enabled = autostart;
+            info.autostart_method = autostart ? "systemd" : "";
+            info.update_state = std::move(state);
+            info.update_latest = "0.2.0";
+            info.update_installable = installable;
+            info.install_state = std::move(install_state);
+            info.install_message = std::move(message);
+            return describe_settings_screen(info);
+        };
+        const auto has_button = [](const PhoneScreen& screen_to_check, PhoneButton id) {
+            return std::any_of(screen_to_check.buttons.begin(), screen_to_check.buttons.end(),
+                               [id](const PhoneScreenButton& candidate) { return candidate.id == id; });
+        };
+        const PhoneScreen installable = install_screen("available");
+        EXPECT(installable.buttons.size() == 3U && installable.buttons[0].id == PhoneButton::kInstallUpdate);
+        EXPECT(installable.buttons[0].label == "Install update" && installable.buttons[0].style == ButtonStyle::kPrimary);
+        EXPECT(installable.buttons[1].id == PhoneButton::kToggleAutostart && installable.buttons[1].label == "Turn on autostart");
+        EXPECT(installable.buttons[2].id == PhoneButton::kClose && installable.buttons[2].style == ButtonStyle::kSecondary);
+        EXPECT(mentions(installable, "Version 0.2.0 is available (you have 0.1.1)") && mentions(installable, "Install update downloads it"));
+        EXPECT(!mentions(installable, "install command") && installable.tone == Tone::kActive);
+        EXPECT(!has_button(installable, PhoneButton::kCheckForUpdates));
+        const PhoneScreen installable_on = install_screen("available", {}, {}, true);
+        EXPECT(installable_on.buttons[0].id == PhoneButton::kInstallUpdate && installable_on.buttons[1].label == "Turn off autostart");
+        EXPECT(installable_on.tone == Tone::kGood);
+
+        const PhoneScreen installing = install_screen("available", "installing");
+        EXPECT(installing.buttons[0].id == PhoneButton::kInstallUpdate && installing.buttons[0].label != "Install update");
+        EXPECT(installing.buttons[0].label.find("Installing") == 0U);
+        EXPECT(mentions(installing, "Installing version 0.2.0") && mentions(installing, "restarts by itself"));
+        EXPECT(!mentions(installing, "Install update downloads it"));
+
+        const PhoneScreen install_failed = install_screen("available", "failed", "Could not download the update. Is the Frame online?");
+        EXPECT(install_failed.buttons[0].id == PhoneButton::kInstallUpdate && install_failed.buttons[0].label == "Try again");
+        EXPECT(mentions(install_failed, "could not be installed: Could not download the update") && install_failed.tone == Tone::kWarning);
+        EXPECT(mentions(install_failed, "Version 0.2.0 is available"));
+        EXPECT(mentions(install_screen("available", "failed"), "could not be installed: it failed."));
+
+        // Only an update that is known to exist is installed, and only by a copy that can.
+        for (const char* state : {"", "checking", "current", "unknown", "failed"}) {
+            const PhoneScreen other = install_screen(state);
+            EXPECT(!has_button(other, PhoneButton::kInstallUpdate) && has_button(other, PhoneButton::kCheckForUpdates));
+        }
+        const PhoneScreen by_hand = install_screen("available", {}, {}, false, false);
+        EXPECT(!has_button(by_hand, PhoneButton::kInstallUpdate) && has_button(by_hand, PhoneButton::kCheckForUpdates));
+        EXPECT(mentions(by_hand, "install command"));
+
+        {   // The same layout as the other screens, and each button answers to a press.
+            PhoneView first;
+            PhoneView second;
+            first.set_screen(installable);
+            second.set_screen(installing);
+            EXPECT(first.signature() != second.signature() && checksum(first.render()) != checksum(second.render()));
+            for (const PhoneScreen& screen_under_test : {installable, installable_on, installing, install_failed}) {
+                PhoneView laid_out;
+                laid_out.set_screen(screen_under_test);
+                EXPECT(laid_out.button_rects().size() == 3U);
+                for (std::size_t index = 0; index < laid_out.button_rects().size(); ++index) {
+                    const PhoneButtonRect& rect = laid_out.button_rects()[index];
+                    EXPECT(rect.bottom < panel_height * 4 / 5 && rect.left >= 0 && rect.right <= panel_width);
+                    const auto pressed = laid_out.hit_test((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+                    EXPECT(pressed && pressed->button == screen_under_test.buttons[index].id);
+                }
+            }
+        }
         EXPECT(mentions(update_screen("unknown", "0.2.0"), "The newest release is 0.2.0"));
         EXPECT(mentions(update_screen("failed", "", "Could not reach github.com. Is the Frame online?"), "Could not reach github.com"));
         EXPECT(mentions(update_screen("failed"), "update check failed"));

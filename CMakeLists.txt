@@ -133,7 +133,8 @@ add_library(frame_notify_core STATIC
     src/system/autostart.cpp
     src/system/process.cpp
     src/system/single_instance.cpp
-    src/system/update_check.cpp)
+    src/system/update_check.cpp
+    src/system/update_install.cpp)
 target_include_directories(frame_notify_core PUBLIC src)
 # The Bluetooth helper is a Python script; a binary started from another directory still finds it
 # here, in the source tree.
@@ -225,6 +226,10 @@ if(BUILD_TESTING)
     add_executable(frame-notify-update-check-test tests/update_check_test.cpp)
     target_link_libraries(frame-notify-update-check-test PRIVATE frame_notify_core)
     add_test(NAME update-check COMMAND frame-notify-update-check-test)
+
+    add_executable(frame-notify-update-install-test tests/update_install_test.cpp)
+    target_link_libraries(frame-notify-update-install-test PRIVATE frame_notify_core)
+    add_test(NAME update-install COMMAND frame-notify-update-install-test)
 
     add_executable(frame-notify-system-test tests/system_test.cpp)
     target_link_libraries(frame-notify-system-test PRIVATE frame_notify_core)

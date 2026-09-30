@@ -27,6 +27,7 @@ enum class PhoneButton {
     kForgetCancelled,  // no, keep it
     kToggleAutostart,  // settings: start with the Frame, or stop doing that
     kCheckForUpdates,  // settings: ask whether a newer version exists
+    kInstallUpdate,    // settings: download and install the newer version
 };
 
 enum class ButtonStyle {

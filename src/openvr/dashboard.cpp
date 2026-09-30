@@ -371,6 +371,7 @@ void Dashboard::handle_phone_click(float x, float y, std::vector<DashboardAction
         break;
     case ui::PhoneButton::kToggleAutostart:
     case ui::PhoneButton::kCheckForUpdates:
+    case ui::PhoneButton::kInstallUpdate:
         break;   // settings buttons; the phone screens have none
     }
 }
@@ -388,6 +389,9 @@ void Dashboard::handle_settings_click(float x, float y, std::vector<DashboardAct
     } else if (hit->button == ui::PhoneButton::kCheckForUpdates) {
         std::cout << "[Dashboard] Check for updates selected\n";
         actions.push_back(make_action(DashboardActionType::CheckForUpdates));
+    } else if (hit->button == ui::PhoneButton::kInstallUpdate) {
+        std::cout << "[Dashboard] Install update selected\n";
+        actions.push_back(make_action(DashboardActionType::InstallUpdate));
     } else if (hit->button == ui::PhoneButton::kClose) {
         show_screen(Screen::kNotifications);
     }

@@ -37,6 +37,7 @@ enum class DashboardActionType {
     RetryBluetooth,
     ToggleAutostart,   // settings: start with the Frame on or off
     CheckForUpdates,   // settings: ask whether a newer version exists
+    InstallUpdate,     // settings: download and install the newer version, then restart
 };
 
 struct DashboardAction {

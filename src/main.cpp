@@ -8,6 +8,7 @@
 #include "system/autostart.h"
 #include "system/single_instance.h"
 #include "system/update_check.h"
+#include "system/update_install.h"
 #include "ui/app_style.h"
 #include "ui/phone_info.h"
 #include "ui/settings_info.h"
@@ -49,6 +50,7 @@ void handle_signal(int) {
 
 constexpr char kAfterSessionVariable[] = "FRAME_NOTIFY_AFTER_SESSION";
 constexpr char kAttachFailuresVariable[] = "FRAME_NOTIFY_ATTACH_FAILURES";
+constexpr char kUpdatedVariable[] = "FRAME_NOTIFY_UPDATED";   // set for the copy that starts after an update
 
 void print_usage(std::string_view executable) {
     std::cout << "Usage: " << executable << " [options]\n"
@@ -205,6 +207,7 @@ struct Outcome {
     int exit_code = 0;
     int attach_failures = 0;    // consecutive, carried over a restart so the pauses can grow
     bool session_ended = false; // a SteamVR session just ended: the next one must be a new SteamVR
+    bool updated = false;       // starting over to run the version that was just installed
 };
 
 std::string current_executable() {
@@ -236,6 +239,19 @@ void apply_update_status(frame_notify::ui::SettingsInfo& settings, const frame_n
     case UpdateState::kAvailable: settings.update_state = "available"; break;
     case UpdateState::kUnknown: settings.update_state = "unknown"; break;
     case UpdateState::kFailed: settings.update_state = "failed"; break;
+    }
+}
+
+void apply_install_status(frame_notify::ui::SettingsInfo& settings,
+                          const frame_notify::system::UpdateInstaller& installer) {
+    using frame_notify::system::InstallState;
+    settings.update_installable = installer.available();
+    settings.install_message = installer.status().message;
+    switch (installer.status().state) {
+    case InstallState::kInstalling: settings.install_state = "installing"; break;
+    case InstallState::kFailed: settings.install_state = "failed"; break;
+    case InstallState::kIdle:
+    case InstallState::kDone: settings.install_state.clear(); break;
     }
 }
 
@@ -294,7 +310,8 @@ int probe_steamvr() {
     return 2;
 }
 
-Outcome run(const Options& options, const std::string& executable, bool after_session, int attach_failures) {
+Outcome run(const Options& options, const std::string& executable, bool after_session, int attach_failures,
+            bool just_updated) {
     using namespace frame_notify;
 
     ipc::SocketServer socket_server;
@@ -359,6 +376,13 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
     system::Autostart autostart(system::Autostart::default_options());
     ui::SettingsInfo settings = read_settings(autostart);
     system::UpdateChecker updates({FRAME_NOTIFY_VERSION, releases_url()});
+    // Updating from the panel works for the copy the installer put in its own folder; one run from a
+    // build or an unpacked download would not be the copy that gets replaced.
+    system::UpdateInstaller installer({system::UpdateInstaller::find_script(
+        executable, system::UpdateInstaller::default_app_dir())});
+    apply_install_status(settings, installer);
+    if (just_updated) std::cout << "[Update] Now running version " << FRAME_NOTIFY_VERSION << '\n';
+    bool update_toast_pending = just_updated;
 
     // SteamVR: the panel and the toasts exist only while SteamVR runs. A pause before the first
     // attempt grows with each failed connection, so a SteamVR that cannot be used is not hammered.
@@ -422,6 +446,20 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
             }
         }
 
+        if (installer.poll()) {
+            const auto& result = installer.status();
+            if (result.state == system::InstallState::kDone) {
+                // The files are replaced; this process still runs the old program. Let go of
+                // SteamVR and the helper as for any restart, and start the new one in its place.
+                std::cout << "[Update] Installed; starting the new version\n";
+                outcome = {true, 0, 0, false, true};
+                break;
+            }
+            std::cerr << "[Update] Installing failed: " << result.message << '\n';
+            apply_install_status(settings, installer);
+            if (vr.attached()) vr.dashboard().set_settings(settings);
+        }
+
         if (updates.poll()) {
             const auto& found = updates.status();
             if (found.state == system::UpdateState::kFailed) {
@@ -448,6 +486,11 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
                 if (test_toast_pending) {
                     vr.notification().show_test();
                     test_toast_pending = false;
+                }
+                if (update_toast_pending) {
+                    vr.notification().show(notification_user_value("update"),
+                                           std::string("Frame Notify updated to ") + FRAME_NOTIFY_VERSION);
+                    update_toast_pending = false;
                 }
                 std::cout << "[Dashboard] Phone Notifications is ready\n"
                           << "[Dashboard] Open the SteamVR Dashboard and select the entry\n";
@@ -532,6 +575,7 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
                     const bool done = was_enabled ? autostart.disable(error) : autostart.enable(error);
                     settings = read_settings(autostart);
                     apply_update_status(settings, updates.status());
+                    apply_install_status(settings, installer);
                     if (!done) {
                         settings.message = std::string("Could not turn autostart ") +
                                            (was_enabled ? "off: " : "on: ") + error;
@@ -540,6 +584,21 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
                         std::cout << "[Autostart] Turned " << (was_enabled ? "off" : "on") << '\n';
                     }
                     dashboard.set_settings(settings);
+                    break;
+                }
+                case DashboardActionType::InstallUpdate: {
+                    const auto& found = updates.status();
+                    if (found.state != system::UpdateState::kAvailable) break;
+                    // Autostart that is off stays off: updating must not change what was chosen.
+                    if (installer.start(found.latest, settings.autostart_enabled)) {
+                        if (installer.status().state == system::InstallState::kFailed) {
+                            std::cerr << "[Update] Could not start installing: " << installer.status().message << '\n';
+                        } else {
+                            std::cout << "[Update] Installing version " << found.latest << '\n';
+                        }
+                        apply_install_status(settings, installer);
+                        dashboard.set_settings(settings);
+                    }
                     break;
                 }
                 case DashboardActionType::CheckForUpdates:
@@ -584,6 +643,18 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
     // Overlays first, while OpenVR is still connected; then the helper.
     vr.detach();
     phone_link.stop();
+
+    // An update that is being installed is not cut off half way (SteamVR quitting, or the service
+    // being stopped, would otherwise kill the installer while it replaces files). It is bounded: a
+    // download that has not finished by then is given up, before anything has been touched.
+    if (installer.status().state == system::InstallState::kInstalling) {
+        std::cout << "[Update] Waiting for the installation to finish before leaving\n";
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < give_up && !installer.poll()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (installer.status().state == system::InstallState::kDone && outcome.restart) outcome.updated = true;
+    }
     return outcome;
 }
 
@@ -647,13 +718,16 @@ int main(int argc, char* argv[]) {
     const std::string executable = current_executable();
     const bool after_session = environment_flag(kAfterSessionVariable);
     const int attach_failures = environment_number(kAttachFailuresVariable, 0);
-    const Outcome outcome = run(options, executable, after_session, attach_failures);
+    const bool just_updated = environment_flag(kUpdatedVariable);
+    unsetenv(kUpdatedVariable);   // a later restart is not an update
+    const Outcome outcome = run(options, executable, after_session, attach_failures, just_updated);
     if (!outcome.restart) return outcome.exit_code;
 
     // A SteamVR session is over. Start over as a fresh process, which can connect to the next
     // SteamVR cleanly; everything the old process held has been released by now.
     setenv(kAfterSessionVariable, outcome.session_ended ? "1" : "0", 1);
     setenv(kAttachFailuresVariable, std::to_string(outcome.attach_failures).c_str(), 1);
+    if (outcome.updated) setenv(kUpdatedVariable, "1", 1);
     std::vector<std::string> restart_arguments = {executable};
     restart_arguments.insert(restart_arguments.end(), arguments.begin(), arguments.end());
     std::vector<char*> restart_argv;

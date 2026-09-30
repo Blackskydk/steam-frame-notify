@@ -14,6 +14,8 @@
 #
 #   install.sh [--no-autostart] [--version vX.Y.Z]      install or update
 #   install.sh --download                               download even from inside an unpacked release
+#   install.sh --keep-running                           for a program that updates itself: do not stop
+#                                                       or start anything, the caller restarts it
 #   install.sh --uninstall [--purge]                    remove it (--purge also deletes the
 #                                                       notification history and the paired phone)
 set -euo pipefail
@@ -27,6 +29,7 @@ UNIT="frame-notify.service"
 
 AUTOSTART=1
 DOWNLOAD=0
+KEEP_RUNNING=0
 UNINSTALL=0
 PURGE=0
 VERSION=""
@@ -45,6 +48,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-autostart) AUTOSTART=0 ;;
         --download) DOWNLOAD=1 ;;
+        --keep-running) KEEP_RUNNING=1 ;;
         --uninstall) UNINSTALL=1 ;;
         --purge) PURGE=1 ;;
         --version) shift; VERSION="${1:-}"; [ -n "$VERSION" ] || fail "--version needs a value such as v0.1.0" ;;
@@ -150,13 +154,19 @@ case "$APP_DIR" in ""|"/"|"$HOME"|"$HOME/") fail "refusing to install into '$APP
 NEW_VERSION="$(cat "$SOURCE_DIR/VERSION" 2>/dev/null || echo unknown)"
 OLD_VERSION="$(cat "$APP_DIR/VERSION" 2>/dev/null || true)"
 
-stop_service
+# Frame Notify updating itself keeps running while its files are replaced, and restarts afterwards.
+if [ "$KEEP_RUNNING" -eq 0 ]; then stop_service; fi
 mkdir -p "$APP_DIR" "$BIN_DIR"
 rm -rf "$APP_DIR/scripts" "$APP_DIR/fonts"
 cp -R "$SOURCE_DIR/scripts" "$APP_DIR/scripts"
 cp -R "$SOURCE_DIR/fonts" "$APP_DIR/fonts"
 for file in LICENSE README.md VERSION install.sh; do
-    if [ -f "$SOURCE_DIR/$file" ]; then cp "$SOURCE_DIR/$file" "$APP_DIR/$file"; fi
+    if [ -f "$SOURCE_DIR/$file" ]; then
+        # Renamed into place, never written over: this script may be the copy that is running
+        # (an update from the installed install.sh), and bash reads a script as it goes.
+        cp "$SOURCE_DIR/$file" "$APP_DIR/$file.new"
+        mv -f "$APP_DIR/$file.new" "$APP_DIR/$file"
+    fi
 done
 # A program that is running can be replaced by renaming a new file over it.
 cp "$SOURCE_DIR/frame-notify" "$APP_DIR/frame-notify.new"
@@ -185,7 +195,9 @@ fi
 
 if [ "$AUTOSTART" -eq 1 ]; then
     if "$APP_DIR/frame-notify" --enable-autostart; then
-        if have systemctl && systemctl --user is-enabled "$UNIT" >/dev/null 2>&1; then
+        if [ "$KEEP_RUNNING" -eq 1 ]; then
+            say "Frame Notify is still running; it starts the new version by itself."
+        elif have systemctl && systemctl --user is-enabled "$UNIT" >/dev/null 2>&1; then
             if systemctl --user restart "$UNIT"; then
                 say "Frame Notify is running in the background."
             else

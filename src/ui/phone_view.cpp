@@ -373,10 +373,23 @@ PhoneScreen describe_settings_screen(const SettingsInfo& info) {
     PhoneScreen screen;
     const PhoneScreenButton check_button = button(
         PhoneButton::kCheckForUpdates, info.update_state == "checking" ? "Checking\xE2\x80\xA6" : "Check for updates");
+    // A newer version that this copy can fetch by itself is installed from here, not by hand.
+    const bool installing = info.install_state == "installing";
+    const bool can_install = info.update_installable && info.update_state == "available";
+    const PhoneScreenButton install_button = button(
+        PhoneButton::kInstallUpdate,
+        installing ? "Installing\xE2\x80\xA6" : info.install_state == "failed" ? "Try again" : "Install update",
+        ButtonStyle::kPrimary);
     screen.title = "Settings";
     screen.icon = PhoneIcon::kGear;
     screen.tone = info.autostart_enabled ? Tone::kGood : Tone::kNeutral;
-    if (info.autostart_enabled) {
+    if (can_install) {
+        screen.body = {info.autostart_enabled ? "Start automatically: on" : "Start automatically: off"};
+        screen.buttons = {install_button,
+                          button(PhoneButton::kToggleAutostart,
+                                 info.autostart_enabled ? "Turn off autostart" : "Turn on autostart"),
+                          button(PhoneButton::kClose, "Close")};
+    } else if (info.autostart_enabled) {
         screen.body = {"Start automatically: on",
                        "Frame Notify starts by itself when the Frame starts and waits in the background "
                        "until SteamVR is running, so notifications are collected before you even put the "
@@ -404,8 +417,23 @@ PhoneScreen describe_settings_screen(const SettingsInfo& info) {
         screen.body.push_back("You have the latest version" +
                               (info.version.empty() ? std::string() : " (" + info.version + ")") + ".");
     } else if (update == "available") {
-        screen.body.push_back("Version " + info.update_latest + " is available" + mine +
-                              ". To update, run the install command from the README again on the Frame.");
+        if (installing) {
+            screen.body.push_back("Installing version " + info.update_latest + "\xE2\x80\xA6 It is downloaded, "
+                                  "checked and put in place, then Frame Notify restarts by itself. This panel "
+                                  "goes away for a moment and comes back.");
+        } else if (can_install) {
+            if (info.install_state == "failed") {
+                screen.body.push_back("The update could not be installed: " +
+                                      (info.install_message.empty() ? std::string("it failed.") : info.install_message));
+                screen.tone = Tone::kWarning;
+            }
+            screen.body.push_back("Version " + info.update_latest + " is available" + mine +
+                                  ". Install update downloads it, checks it and restarts Frame Notify with it. "
+                                  "This panel goes away for a moment and comes back.");
+        } else {
+            screen.body.push_back("Version " + info.update_latest + " is available" + mine +
+                                  ". To update, run the install command from the README again on the Frame.");
+        }
         if (screen.tone == Tone::kNeutral) screen.tone = Tone::kActive;
     } else if (update == "unknown") {
         screen.body.push_back("The newest release is " + info.update_latest +

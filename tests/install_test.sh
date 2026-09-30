@@ -118,6 +118,47 @@ if command -v curl >/dev/null 2>&1; then
     check "  and reports the update" contains "$work/install4b.txt" "Updated Frame Notify from 0.0.1 to 9.9.9"
     check "  replacing the old files" test ! -e "$app/scripts/old_file.py"
     check "  and leaving itself whole" test -f "$app/scripts/ancs_service.py" -a -f "$app/fonts/Inter-Regular.ttf" -a -x "$app/install.sh"
+    # A newer release carries a different install.sh. The copy that is running replaces itself with
+    # it, and must still finish what it is doing (bash reads a script as it goes, so writing over
+    # the file it runs from would scramble its last steps).
+    rm -rf "$work/variant" "$work/dist2"
+    mkdir -p "$work/variant" "$work/dist2"
+    tar -xzf "$asset" -C "$work/variant"
+    { sed -n '1p' "$work/variant/frame-notify/install.sh"
+      for line in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "# padding so that this install.sh is longer than the one it replaces ($line)"; done
+      sed -n '2,$p' "$work/variant/frame-notify/install.sh"; } > "$work/variant/install.sh.longer"
+    mv "$work/variant/install.sh.longer" "$work/variant/frame-notify/install.sh"
+    printf '9.9.10\n' > "$work/variant/frame-notify/VERSION"
+    tar -czf "$work/dist2/frame-notify-linux-aarch64.tar.gz" -C "$work/variant" frame-notify
+    (cd "$work/dist2" && sha256sum frame-notify-linux-aarch64.tar.gz > frame-notify-linux-aarch64.tar.gz.sha256)
+    : > "$FAKE_LOG"
+    FRAME_NOTIFY_DOWNLOAD_BASE="$(file_url "$work/dist2")" run_install bash "$app/install.sh" > "$work/install4d.txt" 2>&1
+    status=$?
+    check "an installed copy replaced by a longer one still finishes" test "$status" -eq 0
+    check "  reporting the update" contains "$work/install4d.txt" "Updated Frame Notify from 9.9.9 to 9.9.10"
+    check "  and its last steps" contains "$work/install4d.txt" "Pair an iPhone"
+    check "  without a stumble" bash -c "! grep -qi 'command not found\|syntax error\|unexpected' '$work/install4d.txt'"
+    check "  and the new installer is in place" contains "$app/install.sh" "padding so that this install.sh is longer"
+    if [ "$status" -ne 0 ] || ! contains "$work/install4d.txt" "Pair an iPhone"; then echo "--- longer-installer output"; cat "$work/install4d.txt"; fi
+
+    # The program updating itself: nothing is stopped or started, and the files are still replaced.
+    # (A service that is stopped mid-update would take the installer down with it.)
+    : > "$FAKE_LOG"
+    printf '0.0.1\n' > "$app/VERSION"
+    FRAME_NOTIFY_DOWNLOAD_BASE="$(file_url "$out")" run_install bash "$app/install.sh" --download --keep-running \
+        --version v9.9.9 > "$work/install4e.txt" 2>&1
+    status=$?
+    check "--keep-running updates" test "$status" -eq 0
+    check "  and reports it" contains "$work/install4e.txt" "Updated Frame Notify from 0.0.1 to 9.9.9"
+    check "  without stopping the service" bash -c "! grep -q 'systemctl --user stop' '$FAKE_LOG'"
+    check "  or restarting it" bash -c "! grep -q 'systemctl --user restart' '$FAKE_LOG'"
+    check "  but still refreshing autostart" contains "$FAKE_LOG" "frame-notify --enable-autostart"
+    check "  and saying the program carries on" contains "$work/install4e.txt" "still running"
+    : > "$FAKE_LOG"
+    FRAME_NOTIFY_DOWNLOAD_BASE="$(file_url "$out")" run_install bash "$app/install.sh" --download --keep-running \
+        --no-autostart > "$work/install4f.txt" 2>&1
+    check "--keep-running with --no-autostart leaves autostart alone" bash -c "! grep -q 'autostart\|systemctl' '$FAKE_LOG'"
+
     # --download also works from inside an unpacked release.
     FRAME_NOTIFY_DOWNLOAD_BASE="$(file_url "$out")" run_install bash "$work/unpacked/frame-notify/install.sh" --download > "$work/install4c.txt" 2>&1
     check "--download downloads even from an unpacked release" contains "$work/install4c.txt" "Downloading Frame Notify"
