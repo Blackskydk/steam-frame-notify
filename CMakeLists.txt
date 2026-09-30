@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(frame-notify VERSION 0.1.4 LANGUAGES CXX)
+project(frame-notify VERSION 0.1.5 LANGUAGES CXX)
 
 set(FRAME_NOTIFY_VERSION "${PROJECT_VERSION}" CACHE STRING "The version the program reports (releases set it from the tag)")
 
