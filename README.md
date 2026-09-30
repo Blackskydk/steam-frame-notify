@@ -66,29 +66,6 @@ whether SteamVR is up, never starts SteamVR itself, and shows the panel as soon 
 SteamVR quits it starts over and waits for the next time. The close button on the panel's control bar
 only removes the dashboard entry until SteamVR restarts; it does not stop Frame Notify.
 
-### Install with FrameDrop (experimental)
-
-If you use [FrameDrop](https://framedropvr.com/), a third-party Windows app that sideloads builds
-onto a Steam Frame (it needs Developer Mode and pairing; see its own documentation), Frame Notify
-can be installed from there without a terminal. Its manifest lives in this repository and its
-download is the release archive on GitHub, so nothing is hosted anywhere else:
-
-**[Install with FrameDrop](https://framedropvr.com/install?manifest=https%3A%2F%2Fraw.githubusercontent.com%2FBlackskydk%2Fsteam-frame-notify%2Fmain%2Fframedrop.json)**
-
-You can also drop `frame-notify-linux-aarch64.zip` from the
-[latest release](https://github.com/Blackskydk/steam-frame-notify/releases/latest) onto FrameDrop.
-
-FrameDrop adds the build to your Steam library as a title. **Start that title once.** The zip
-contains a file named `setup-on-launch`, so starting it runs the bundled installer (the same one
-as above) instead of the program itself: it installs Frame Notify for your user, starts it in the
-background, and ends. What happened is written to `~/.local/state/frame-notify/setup.log`. From
-then on Frame Notify runs by itself and the Steam title is not needed; starting it again just runs
-the setup once more, which also updates an older version.
-
-This route relies on details of FrameDrop that are not documented (which file it starts, whether
-`systemctl --user` works from a Steam title), so treat it as experimental and use the command above
-if it does not work for you.
-
 If you would rather build it yourself, see [Build on Steam Frame](#build-on-steam-frame).
 
 ## Safety and scope

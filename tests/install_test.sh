@@ -61,29 +61,6 @@ done
 tar -tvzf "$asset" --numeric-owner > "$work/verbose.txt"
 check "the archive names no builder" bash -c "! grep -v ' 0/0 ' '$work/verbose.txt' | grep -q '/'"
 
-# ---- the zip for FrameDrop ----
-zip="$out/frame-notify-linux-aarch64.zip"
-check "the FrameDrop zip exists" test -f "$zip"
-check "the tarball has no setup marker (the installer must not trigger it)" bash -c "! grep -q setup-on-launch '$work/listing.txt'"
-if command -v unzip >/dev/null 2>&1 && [ -f "$zip" ]; then
-    unzip -Z "$zip" > "$work/zipinfo.txt"
-    unzip -Z1 "$zip" > "$work/ziplist.txt"
-    for entry in frame-notify/ frame-notify/frame-notify frame-notify/install.sh frame-notify/setup-on-launch \
-                 frame-notify/VERSION frame-notify/scripts/ancs_service.py frame-notify/fonts/Inter-Regular.ttf; do
-        check "the zip holds $entry" grep -qxF -- "$entry" "$work/ziplist.txt"
-    done
-    check "the program is executable in the zip" grep -qE -- '^-rwxr-xr-x.* frame-notify/frame-notify$' "$work/zipinfo.txt"
-    check "the installer is executable in the zip" grep -qE -- '^-rwxr-xr-x.* frame-notify/install.sh$' "$work/zipinfo.txt"
-    check "other files are not executable in the zip" grep -qE -- '^-rw-r--r--.* frame-notify/scripts/ancs_service.py$' "$work/zipinfo.txt"
-    mkdir -p "$work/unzipped"
-    unzip -q "$zip" -d "$work/unzipped"
-    check "an unpacked zip installs like the tarball" bash -c "
-        cd '$work' && HOME='$work/zip-home' XDG_RUNTIME_DIR='$work/run' XDG_CONFIG_HOME='$work/zip-home/.config' \
-        PATH='$work/fakebin':\$PATH FRAME_NOTIFY_ALLOW_ROOT=1 FRAME_NOTIFY_ALLOW_ANY_ARCH=1 \
-        bash '$work/unzipped/frame-notify/install.sh' >/dev/null 2>&1 && test -x '$work/zip-home/.local/share/frame-notify/frame-notify'"
-    check "the marker is not installed" test ! -e "$work/zip-home/.local/share/frame-notify/setup-on-launch"
-fi
-
 # ---- installing from an unpacked release ----
 mkdir -p "$work/unpacked"
 tar -xzf "$asset" -C "$work/unpacked"
