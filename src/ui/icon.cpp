@@ -29,6 +29,23 @@ void draw_bell(Canvas& canvas, float center_x, float center_y, float height, Col
     canvas.fill_circle(center_x, center_y + 40.0F * scale, 9.0F * scale, color);
 }
 
+void draw_gear(Canvas& canvas, float center_x, float center_y, float diameter, Color color) {
+    const float radius = diameter / 2.0F;
+    constexpr int kTeeth = 8;
+    constexpr float kTwoPi = 6.2831853F;
+    Path path;
+    path.add_circle({center_x, center_y}, radius * 0.66F);
+    for (int tooth = 0; tooth < kTeeth; ++tooth) {
+        const float angle = kTwoPi * static_cast<float>(tooth) / static_cast<float>(kTeeth);
+        const float dx = std::cos(angle);
+        const float dy = std::sin(angle);
+        path.add_capsule({center_x + dx * radius * 0.62F, center_y + dy * radius * 0.62F},
+                         {center_x + dx * radius * 0.83F, center_y + dy * radius * 0.83F}, radius * 0.17F);
+    }
+    path.add_circle({center_x, center_y}, radius * 0.30F, true);   // the hole
+    canvas.fill_path(path, color);
+}
+
 void draw_cross(Canvas& canvas, float center_x, float center_y, float arm, float thickness,
                 Color color) {
     Path path;

@@ -369,8 +369,43 @@ PhoneScreen describe_phone_screen(const PhoneInfo& info, bool confirm_forget) {
     return screen;
 }
 
+PhoneScreen describe_settings_screen(const SettingsInfo& info) {
+    PhoneScreen screen;
+    screen.title = "Settings";
+    screen.icon = PhoneIcon::kGear;
+    screen.tone = info.autostart_enabled ? Tone::kGood : Tone::kNeutral;
+    if (info.autostart_enabled) {
+        screen.body = {"Start automatically: on",
+                       "Frame Notify starts by itself when the Frame starts and waits in the background "
+                       "until SteamVR is running, so notifications are collected before you even put the "
+                       "headset on."};
+        if (info.autostart_method == "desktop") {
+            screen.body.push_back("This uses a desktop autostart entry, because the Frame has no systemd "
+                                  "user service to use.");
+        }
+        screen.buttons = {button(PhoneButton::kClose, "Close", ButtonStyle::kPrimary),
+                          button(PhoneButton::kToggleAutostart, "Turn off autostart")};
+    } else {
+        screen.body = {"Start automatically: off",
+                       "Frame Notify only runs until you stop it or the Frame restarts. Turn this on to "
+                       "have it start with the Frame and wait in the background for SteamVR."};
+        screen.buttons = {button(PhoneButton::kToggleAutostart, "Turn on autostart", ButtonStyle::kPrimary),
+                          button(PhoneButton::kClose, "Close")};
+    }
+    if (!info.message.empty()) {
+        screen.body.push_back(info.message);
+        screen.tone = Tone::kWarning;
+    }
+    if (!info.version.empty()) screen.footer = "Frame Notify " + info.version;
+    return screen;
+}
+
 void PhoneView::set(const PhoneInfo& info, bool confirm_forget) {
-    screen_ = describe_phone_screen(info, confirm_forget);
+    set_screen(describe_phone_screen(info, confirm_forget));
+}
+
+void PhoneView::set_screen(PhoneScreen screen) {
+    screen_ = std::move(screen);
     lines_.clear();
     badges_.clear();
     button_rects_.clear();
@@ -552,6 +587,7 @@ std::vector<std::uint8_t> PhoneView::render() const {
     case PhoneIcon::kBluetooth: draw_bluetooth(canvas, icon_x_, icon_y_, accent); break;
     case PhoneIcon::kCheck: draw_check(canvas, icon_x_, icon_y_, accent); break;
     case PhoneIcon::kWarning: draw_warning(canvas, icon_x_, icon_y_, accent); break;
+    case PhoneIcon::kGear: draw_gear(canvas, icon_x_, icon_y_, 64.0F, accent); break;
     }
 
     if (code_box_.right > code_box_.left) {

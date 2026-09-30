@@ -71,7 +71,7 @@ echo [Push] Steam Frame build succeeded.
 set "RESULT=0"
 if "%RUN_AFTER_BUILD%"=="1" (
     echo [Run] Starting Frame Notify. Press Ctrl+C to stop.
-    ssh.exe %SSH_OPTS% -t "%FRAME_TARGET%" "cd ~/%REMOTE_DIR% && ./build-frame/frame-notify-test%RUN_OPTION%"
+    ssh.exe %SSH_OPTS% -t "%FRAME_TARGET%" "(systemctl --user stop frame-notify 2>/dev/null; true) && cd ~/%REMOTE_DIR% && ./build-frame/frame-notify%RUN_OPTION%"
 ) else (
     echo Run the new build with: scripts\push-frame.cmd -Run
 )

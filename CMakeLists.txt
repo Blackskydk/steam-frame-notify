@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(frame-notify VERSION 0.1.0 LANGUAGES CXX)
 
+set(FRAME_NOTIFY_VERSION "${PROJECT_VERSION}" CACHE STRING "The version the program reports (releases set it from the tag)")
+
 include(CTest)
 include(FetchContent)
 
@@ -127,48 +129,54 @@ add_library(frame_notify_core STATIC
     src/bluetooth/phone_link.cpp
     src/history/store.cpp
     src/ipc/json_line.cpp
-    src/ipc/socket_server.cpp)
+    src/ipc/socket_server.cpp
+    src/system/autostart.cpp
+    src/system/process.cpp
+    src/system/single_instance.cpp)
 target_include_directories(frame_notify_core PUBLIC src)
 # The Bluetooth helper is a Python script; a binary started from another directory still finds it
 # here, in the source tree.
 target_compile_definitions(frame_notify_core PRIVATE
     "FRAME_NOTIFY_SCRIPTS_DIR=\"${CMAKE_SOURCE_DIR}/scripts\"")
 
-add_executable(frame-notify-test
+add_executable(frame-notify
     src/main.cpp
+    src/openvr/attach_plan.cpp
     src/openvr/dashboard.cpp
     src/openvr/notifications.cpp
-    src/openvr/runtime.cpp)
-target_include_directories(frame-notify-test PRIVATE src)
-target_link_libraries(frame-notify-test PRIVATE
+    src/openvr/runtime.cpp
+    src/openvr/vr_session.cpp)
+target_include_directories(frame-notify PRIVATE src)
+target_compile_definitions(frame-notify PRIVATE "FRAME_NOTIFY_VERSION=\"${FRAME_NOTIFY_VERSION}\"")
+target_link_libraries(frame-notify PRIVATE
     frame_notify_core
     frame_notify_ui
     ${frame_notify_openvr_target})
 if(frame_notify_openvr_static)
-    target_compile_definitions(frame-notify-test PRIVATE OPENVR_BUILD_STATIC)
+    target_compile_definitions(frame-notify PRIVATE OPENVR_BUILD_STATIC)
 endif()
 
 if(MSVC)
-    target_compile_definitions(frame-notify-test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(frame-notify PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(frame_notify_core PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_options(frame-notify-test PRIVATE /W4 /permissive-)
+    target_compile_options(frame-notify PRIVATE /W4 /permissive-)
     target_compile_options(frame_notify_core PRIVATE /W4 /permissive- /utf-8)
     target_compile_options(frame_notify_ui PRIVATE /W4 /permissive- /utf-8)
 else()
-    target_compile_options(frame-notify-test PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(frame-notify PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(frame_notify_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(frame_notify_ui PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-set_target_properties(frame-notify-test PROPERTIES
+set_target_properties(frame-notify PROPERTIES
     BUILD_RPATH "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
 
 if(UNIX AND OPENVR_LIBRARY MATCHES "\\.so(\\..*)?$")
-    add_custom_command(TARGET frame-notify-test POST_BUILD
+    add_custom_command(TARGET frame-notify POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${OPENVR_LIBRARY}" "$<TARGET_FILE_DIR:frame-notify-test>"
-        COMMENT "Copying the supplied OpenVR shared library beside frame-notify-test")
+            "${OPENVR_LIBRARY}" "$<TARGET_FILE_DIR:frame-notify>"
+        COMMENT "Copying the supplied OpenVR shared library beside frame-notify")
 endif()
 
 if(BUILD_TESTING)
@@ -191,6 +199,12 @@ if(BUILD_TESTING)
     target_link_libraries(frame-notify-ui-test PRIVATE frame_notify_ui)
     add_test(NAME ui-primitives COMMAND frame-notify-ui-test)
 
+    find_program(FRAME_NOTIFY_BASH bash)
+    if(FRAME_NOTIFY_BASH)
+        add_test(NAME install-scripts
+            COMMAND "${FRAME_NOTIFY_BASH}" "${CMAKE_SOURCE_DIR}/tests/install_test.sh")
+    endif()
+
     add_executable(frame-notify-scroll-texture-test tests/scroll_texture_test.cpp)
     target_link_libraries(frame-notify-scroll-texture-test PRIVATE frame_notify_ui)
     add_test(NAME scroll-texture COMMAND frame-notify-scroll-texture-test)
@@ -202,6 +216,14 @@ if(BUILD_TESTING)
     add_executable(frame-notify-message-test tests/notification_message_test.cpp)
     target_link_libraries(frame-notify-message-test PRIVATE frame_notify_core)
     add_test(NAME notification-message-parsing COMMAND frame-notify-message-test)
+
+    add_executable(frame-notify-attach-plan-test tests/attach_plan_test.cpp src/openvr/attach_plan.cpp)
+    target_include_directories(frame-notify-attach-plan-test PRIVATE src)
+    add_test(NAME steamvr-attach-plan COMMAND frame-notify-attach-plan-test)
+
+    add_executable(frame-notify-system-test tests/system_test.cpp)
+    target_link_libraries(frame-notify-system-test PRIVATE frame_notify_core)
+    add_test(NAME system-autostart-and-lock COMMAND frame-notify-system-test)
 
     add_executable(frame-notify-phone-link-test tests/phone_link_test.cpp)
     target_link_libraries(frame-notify-phone-link-test PRIVATE frame_notify_core)

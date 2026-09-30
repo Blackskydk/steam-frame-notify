@@ -2,6 +2,7 @@
 
 #include "ui/phone_info.h"
 #include "ui/renderer.h"
+#include "ui/settings_info.h"
 
 #include <cstdint>
 #include <optional>
@@ -24,6 +25,7 @@ enum class PhoneButton {
     kForget,           // ask whether to forget the phone
     kForgetConfirmed,  // yes, forget it
     kForgetCancelled,  // no, keep it
+    kToggleAutostart,  // settings: start with the Frame, or stop doing that
 };
 
 enum class ButtonStyle {
@@ -44,6 +46,7 @@ enum class PhoneIcon {
     kBluetooth,
     kCheck,
     kWarning,
+    kGear,
 };
 
 // Everything one screen says, before it is laid out: which step of pairing it is, what the user
@@ -62,6 +65,8 @@ struct PhoneScreen {
 // The screen for what the helper reports. `confirm_forget` replaces it with the "forget this
 // phone?" question.
 [[nodiscard]] PhoneScreen describe_phone_screen(const PhoneInfo& info, bool confirm_forget);
+// The settings screen.
+[[nodiscard]] PhoneScreen describe_settings_screen(const SettingsInfo& info);
 // Whether "Forget this phone" makes sense in this state.
 [[nodiscard]] bool phone_state_can_forget(const std::string& state);
 // "4:32" for 272 seconds; negative counts as zero.
@@ -85,6 +90,8 @@ struct PhoneButtonRect {
 class PhoneView {
 public:
     void set(const PhoneInfo& info, bool confirm_forget);
+    // Any card screen, such as the settings.
+    void set_screen(PhoneScreen screen);
 
     [[nodiscard]] const PhoneScreen& screen() const noexcept { return screen_; }
     [[nodiscard]] std::uint64_t signature() const noexcept { return signature_; }

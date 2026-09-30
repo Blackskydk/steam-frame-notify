@@ -176,7 +176,8 @@ std::vector<DashboardAction> Dashboard::poll_events() {
             }
             // Next time the dashboard opens it shows the notifications again, unless a pairing is
             // still in progress and needs the user.
-            if (screen_ == Screen::kPhone && !ui::phone_state_is_pairing(phone_.state)) {
+            if ((screen_ == Screen::kPhone && !ui::phone_state_is_pairing(phone_.state)) ||
+                screen_ == Screen::kSettings) {
                 show_screen(Screen::kNotifications);
             }
             break;
@@ -280,6 +281,10 @@ void Dashboard::handle_click(float x, float y, std::vector<DashboardAction>& act
         handle_phone_click(x, y, actions);
         return;
     }
+    if (screen_ == Screen::kSettings) {
+        handle_settings_click(x, y, actions);
+        return;
+    }
     const auto target = view_.hit_test(static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y)),
                                        uploaded_scroll_offset_);
     if (!target) {
@@ -294,6 +299,9 @@ void Dashboard::handle_click(float x, float y, std::vector<DashboardAction>& act
     } else if (target->kind == ui::HistoryHitKind::kPhoneChip) {
         std::cout << "[Dashboard] Phone status selected\n";
         show_screen(Screen::kPhone);
+    } else if (target->kind == ui::HistoryHitKind::kSettings) {
+        std::cout << "[Dashboard] Settings selected\n";
+        show_screen(Screen::kSettings);
     } else if (target->kind == ui::HistoryHitKind::kPairPrompt) {
         std::cout << "[Dashboard] Pair an iPhone selected\n";
         actions.push_back(make_action(DashboardActionType::PairStart));
@@ -361,6 +369,23 @@ void Dashboard::handle_phone_click(float x, float y, std::vector<DashboardAction
         confirm_forget_ = false;
         refresh();
         break;
+    case ui::PhoneButton::kToggleAutostart:
+        break;   // a settings button; the phone screens have none
+    }
+}
+
+void Dashboard::handle_settings_click(float x, float y, std::vector<DashboardAction>& actions) {
+    const auto hit = settings_view_.hit_test(static_cast<int>(std::lround(x)),
+                                             static_cast<int>(std::lround(y)), uploaded_scroll_offset_);
+    if (!hit) {
+        std::cout << "[Dashboard] Selection did not hit a control\n";
+        return;
+    }
+    if (hit->button == ui::PhoneButton::kToggleAutostart) {
+        std::cout << "[Dashboard] Autostart toggle selected\n";
+        actions.push_back(make_action(DashboardActionType::ToggleAutostart));
+    } else if (hit->button == ui::PhoneButton::kClose) {
+        show_screen(Screen::kNotifications);
     }
 }
 
@@ -373,7 +398,7 @@ void Dashboard::show_screen(Screen screen) {
     }
     if (screen_ == Screen::kNotifications) notifications_scroll_ = uploaded_scroll_offset_;
     screen_ = screen;
-    if (screen_ == Screen::kPhone) {
+    if (screen_ != Screen::kNotifications) {
         scroll_.reset();
         uploaded_scroll_offset_ = 0;
     } else {
@@ -422,14 +447,14 @@ ui::PhoneInfo Dashboard::phone_with_elapsed_time() const {
 }
 
 std::uint64_t Dashboard::current_signature() const noexcept {
-    return screen_ == Screen::kPhone ? phone_view_.signature() : view_.signature();
+    return screen_ == Screen::kNotifications ? view_.signature() : card_view().signature();
 }
 
 bool Dashboard::upload_content() {
     // Render the whole screen once, then upload the part of it around the current scroll position.
-    const bool phone_screen = screen_ == Screen::kPhone;
-    content_ = phone_screen ? phone_view_.render() : view_.render_content();
-    content_rows_ = phone_screen ? phone_view_.content_height() : view_.content_height();
+    const bool card_screen = screen_ != Screen::kNotifications;
+    content_ = card_screen ? card_view().render() : view_.render_content();
+    content_rows_ = card_screen ? card_view().content_height() : view_.content_height();
     return upload_window(uploaded_scroll_offset_);
 }
 
@@ -453,6 +478,7 @@ bool Dashboard::upload_window(int scroll_offset) {
         std::cerr << "[Dashboard] SetOverlayRaw for history content failed: "
                   << overlay_error_name(overlay_api_, error) << " (" << static_cast<int>(error)
                   << ")\n";
+        ++overlay_failures_;
         return false;
     }
     return true;
@@ -469,8 +495,10 @@ bool Dashboard::update_scroll_view(int scroll_offset) {
         std::cerr << "[Dashboard] SetOverlayTextureBounds failed: "
                   << overlay_error_name(overlay_api_, error) << " (" << static_cast<int>(error)
                   << ")\n";
+        ++overlay_failures_;
         return false;
     }
+    overlay_failures_ = 0;
     return true;
 }
 
@@ -488,8 +516,8 @@ bool Dashboard::set_history(std::vector<ui::HistoryNotification> notifications, 
         view_.notifications().begin(), view_.notifications().end(),
         [](const ui::HistoryNotification& notification) { return !notification.read; }));
     if (unread != thumbnail_unread_) update_thumbnail(unread);
-    if (screen_ == Screen::kPhone) {
-        // The list is only laid out for later; the phone screen stays as it is.
+    if (screen_ != Screen::kNotifications) {
+        // The list is only laid out for later; the card screen stays as it is.
         if (reset_scroll) notifications_scroll_ = 0;
         return present(false);
     }
@@ -497,16 +525,17 @@ bool Dashboard::set_history(std::vector<ui::HistoryNotification> notifications, 
 }
 
 bool Dashboard::present(bool reset_scroll) {
-    const bool phone_screen = screen_ == Screen::kPhone;
+    const bool phone_screen = screen_ != Screen::kNotifications;   // a card screen, phone or settings
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
     rendered_second_ = now;
     rendered_minute_ = now / 60;
-    if (phone_screen) phone_view_.set(phone_with_elapsed_time(), confirm_forget_);
+    if (screen_ == Screen::kPhone) phone_view_.set(phone_with_elapsed_time(), confirm_forget_);
+    if (screen_ == Screen::kSettings) settings_view_.set_screen(ui::describe_settings_screen(settings_));
 
     const int maximum_scroll =
-        phone_screen ? phone_view_.maximum_scroll_offset() : view_.maximum_scroll_offset();
+        phone_screen ? card_view().maximum_scroll_offset() : view_.maximum_scroll_offset();
     if (reset_scroll) {
         scroll_.reset();
         uploaded_scroll_offset_ = 0;
@@ -549,8 +578,13 @@ bool Dashboard::set_phone(ui::PhoneInfo phone) {
     return refresh();
 }
 
+bool Dashboard::set_settings(ui::SettingsInfo settings) {
+    settings_ = std::move(settings);
+    return screen_ == Screen::kSettings ? present(false) : true;
+}
+
 bool Dashboard::refresh() {
-    if (screen_ == Screen::kPhone) return present(false);
+    if (screen_ != Screen::kNotifications) return present(false);
     return set_history(view_.notifications(), false);
 }
 

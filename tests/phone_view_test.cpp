@@ -369,6 +369,56 @@ int main() {
         EXPECT(second && second->button == PhoneButton::kRemoveConflict && second->argument == "AA:02");
     }
 
+    // ---- Settings ----
+    {
+        SettingsInfo off;
+        off.version = "1.2.3";
+        const PhoneScreen screen = describe_settings_screen(off);
+        EXPECT(screen.title == "Settings" && screen.icon == PhoneIcon::kGear);
+        EXPECT(mentions(screen, "Start automatically: off") && mentions(screen, "Frame Notify 1.2.3"));
+        EXPECT(screen.buttons.size() == 2U && screen.buttons[0].id == PhoneButton::kToggleAutostart);
+        EXPECT(screen.buttons[0].label == "Turn on autostart" && screen.buttons[0].style == ButtonStyle::kPrimary);
+        EXPECT(screen.buttons[1].id == PhoneButton::kClose);
+
+        SettingsInfo on;
+        on.autostart_enabled = true;
+        on.autostart_method = "systemd";
+        const PhoneScreen enabled = describe_settings_screen(on);
+        EXPECT(mentions(enabled, "Start automatically: on") && enabled.tone == Tone::kGood);
+        EXPECT(enabled.buttons.size() == 2U && enabled.buttons[0].id == PhoneButton::kClose &&
+               enabled.buttons[0].style == ButtonStyle::kPrimary);
+        EXPECT(enabled.buttons[1].id == PhoneButton::kToggleAutostart && enabled.buttons[1].label == "Turn off autostart");
+        EXPECT(!mentions(enabled, "desktop autostart entry") && enabled.footer.empty());
+        on.autostart_method = "desktop";
+        EXPECT(mentions(describe_settings_screen(on), "desktop autostart entry"));
+
+        SettingsInfo failed;
+        failed.message = "systemd: Failed to enable: boom";
+        const PhoneScreen problem = describe_settings_screen(failed);
+        EXPECT(problem.tone == Tone::kWarning && mentions(problem, "Failed to enable: boom"));
+
+        // It lays out and draws like any other card screen, and its buttons answer to presses.
+        PhoneView view;
+        view.set_screen(describe_settings_screen(off));
+        EXPECT(view.render().size() == static_cast<std::size_t>(panel_width) * static_cast<std::size_t>(view.content_height()) * 4U);
+        EXPECT(view.button_rects().size() == 2U);
+        const PhoneButtonRect toggle = view.button_rects()[0];
+        const auto hit = view.hit_test((toggle.left + toggle.right) / 2, (toggle.top + toggle.bottom) / 2);
+        EXPECT(hit && hit->button == PhoneButton::kToggleAutostart);
+        EXPECT(toggle.bottom < panel_height * 7 / 10);
+        PhoneView enabled_view;
+        enabled_view.set_screen(describe_settings_screen(SettingsInfo{true, "systemd", {}, {}}));
+        EXPECT(view.signature() != enabled_view.signature());
+        EXPECT(checksum(view.render()) != checksum(enabled_view.render()));
+        PhoneView long_problem;
+        SettingsInfo wordy;
+        wordy.message = std::string(3000, 'w');
+        long_problem.set_screen(describe_settings_screen(wordy));
+        EXPECT(long_problem.render().size() ==
+               static_cast<std::size_t>(panel_width) * static_cast<std::size_t>(long_problem.content_height()) * 4U);
+        for (const auto& rect : long_problem.button_rects()) EXPECT(rect.bottom <= long_problem.content_height());
+    }
+
     // ---- Reach: buttons hang high in the panel, and the screen can be dragged up ----
     {
         // The usual screens keep their buttons in the upper part of the panel.

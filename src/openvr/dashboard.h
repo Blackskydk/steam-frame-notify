@@ -5,6 +5,7 @@
 #include "ui/phone_view.h"
 #include "ui/scroll_controller.h"
 #include "ui/scroll_texture.h"
+#include "ui/settings_info.h"
 
 #include <chrono>
 #include <cstdint>
@@ -34,6 +35,7 @@ enum class DashboardActionType {
     ForgetPhone,
     PowerOnBluetooth,
     RetryBluetooth,
+    ToggleAutostart,   // settings: start with the Frame on or off
 };
 
 struct DashboardAction {
@@ -57,21 +59,27 @@ public:
     // Tells the panel what the Bluetooth helper reports. Pairing steps that need the user (a code
     // to compare, a result) bring the phone screen forward on their own.
     bool set_phone(ui::PhoneInfo phone);
+    // What the settings screen shows.
+    bool set_settings(ui::SettingsInfo settings);
     // Re-lays out the current screen against the clock, for example so "3 min ago" is right
     // before the dashboard appears. Nothing is uploaded when no pixel would change.
     bool refresh();
     [[nodiscard]] std::uint64_t main_handle() const noexcept { return main_handle_; }
     // How far the panel is scrolled, in pixels from the top of the content.
     [[nodiscard]] int scroll_offset() const noexcept { return uploaded_scroll_offset_; }
+    // True once several calls to SteamVR in a row have failed: it has most likely gone away.
+    [[nodiscard]] bool broken() const noexcept { return overlay_failures_ >= kFailuresBeforeBroken; }
     // Whether the dashboard panel is on screen right now.
     [[nodiscard]] bool visible() const noexcept { return dashboard_visible_; }
     // Whether the phone screen, rather than the notifications, is what the panel shows.
     [[nodiscard]] bool showing_phone_screen() const noexcept { return screen_ == Screen::kPhone; }
+    [[nodiscard]] bool showing_settings() const noexcept { return screen_ == Screen::kSettings; }
 
 private:
     enum class Screen {
         kNotifications,
         kPhone,
+        kSettings,
     };
 
     [[nodiscard]] ui::HistoryContext make_context();
@@ -80,6 +88,11 @@ private:
     [[nodiscard]] ui::PanelPoint pointer_on_panel(float mouse_x, float mouse_y) const;
     void handle_click(float x, float y, std::vector<DashboardAction>& actions);
     void handle_phone_click(float x, float y, std::vector<DashboardAction>& actions);
+    void handle_settings_click(float x, float y, std::vector<DashboardAction>& actions);
+    // The card screen (phone or settings) that is showing; only valid off the notifications screen.
+    [[nodiscard]] const ui::PhoneView& card_view() const noexcept {
+        return screen_ == Screen::kSettings ? settings_view_ : phone_view_;
+    }
     void show_screen(Screen screen);
     void update_thumbnail(int unread);
     bool present(bool reset_scroll);
@@ -108,6 +121,8 @@ private:
     ui::ScrollTexture texture_;
     std::vector<std::uint8_t> content_;  // the current screen at full height
     int content_rows_ = 0;
+    static constexpr int kFailuresBeforeBroken = 5;
+    int overlay_failures_ = 0;       // consecutive failed calls that change what the overlay shows
     bool texture_replaced_ = false;  // the window moved since the last poll of the overlay's events
     std::uint64_t uploaded_signature_ = 0;
     Screen uploaded_screen_ = Screen::kNotifications;
@@ -122,6 +137,8 @@ private:
     std::chrono::steady_clock::time_point phone_changed_at_ = std::chrono::steady_clock::now();
     bool confirm_forget_ = false;  // the phone screen asks "forget this phone?"
     ui::PhoneView phone_view_;
+    ui::SettingsInfo settings_;
+    ui::PhoneView settings_view_;
 };
 
 }  // namespace frame_notify::openvr

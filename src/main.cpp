@@ -4,17 +4,26 @@
 #include "openvr/dashboard.h"
 #include "openvr/notifications.h"
 #include "openvr/runtime.h"
+#include "openvr/vr_session.h"
+#include "system/autostart.h"
+#include "system/single_instance.h"
 #include "ui/app_style.h"
 #include "ui/phone_info.h"
+#include "ui/settings_info.h"
 #include "ui/time_format.h"
 
 #include <openvr.h>
 
+#include <unistd.h>
+
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -23,7 +32,13 @@
 #include <utility>
 #include <vector>
 
+#ifndef FRAME_NOTIFY_VERSION
+#define FRAME_NOTIFY_VERSION "development"
+#endif
+
 namespace {
+
+using frame_notify::openvr::DashboardActionType;
 
 std::atomic_bool keep_running{true};
 
@@ -31,19 +46,37 @@ void handle_signal(int) {
     keep_running.store(false);
 }
 
+constexpr char kAfterSessionVariable[] = "FRAME_NOTIFY_AFTER_SESSION";
+constexpr char kAttachFailuresVariable[] = "FRAME_NOTIFY_ATTACH_FAILURES";
+
 void print_usage(std::string_view executable) {
-    std::cout << "Usage: " << executable
-              << " [--diagnostics-only] [--native-notification] [--no-bluetooth]\n"
+    std::cout << "Usage: " << executable << " [options]\n"
               << "\n"
-              << "  --diagnostics-only     Initialize OpenVR, print diagnostics, and exit.\n"
-              << "  --native-notification  Ask SteamVR to show a real test notification.\n"
+              << "Frame Notify runs in the background, keeps the iPhone connection and the notification\n"
+              << "history going, and shows them in SteamVR whenever SteamVR is running.\n"
+              << "\n"
+              << "  --enable-autostart     Start Frame Notify by itself when the Frame starts.\n"
+              << "  --disable-autostart    Stop doing that.\n"
+              << "  --autostart-status     Say whether it does.\n"
               << "  --no-bluetooth         Do not start the iPhone Bluetooth helper (also set by\n"
-              << "                         FRAME_NOTIFY_NO_BLUETOOTH=1).\n";
+              << "                         FRAME_NOTIFY_NO_BLUETOOTH=1).\n"
+              << "  --diagnostics-only     Connect to SteamVR, print diagnostics, and exit.\n"
+              << "  --native-notification  Ask SteamVR to show a real test notification.\n"
+              << "  --version              Print the version.\n";
 }
 
 bool environment_flag(const char* name) {
     const char* value = std::getenv(name);
     return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+}
+
+int environment_number(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return fallback;
+    int parsed = 0;
+    const std::string_view text(value);
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size() ? parsed : fallback;
 }
 
 frame_notify::ui::PhoneInfo make_phone_info(const frame_notify::bluetooth::PhoneStatus& status) {
@@ -149,74 +182,103 @@ int retention_setting(const char* name, int fallback, int minimum, int maximum) 
     return parsed;
 }
 
-}  // namespace
-
-int main(int argc, char* argv[]) {
+struct Options {
     bool diagnostics_only = false;
     bool native_notification = false;
-    bool use_bluetooth = !environment_flag("FRAME_NOTIFY_NO_BLUETOOTH");
-    for (int index = 1; index < argc; ++index) {
-        const std::string_view argument{argv[index]};
-        if (argument == "--diagnostics-only") {
-            diagnostics_only = true;
-        } else if (argument == "--native-notification") {
-            native_notification = true;
-        } else if (argument == "--no-bluetooth") {
-            use_bluetooth = false;
-        } else if (argument == "--help" || argument == "-h") {
-            print_usage(argv[0]);
-            return 0;
-        } else {
-            std::cerr << "Unknown option: " << argument << "\n";
-            print_usage(argv[0]);
-            return 2;
+    bool use_bluetooth = true;
+};
+
+// How a run of the program ends: for good, or by starting over.
+struct Outcome {
+    bool restart = false;
+    int exit_code = 0;
+    int attach_failures = 0;    // consecutive, carried over a restart so the pauses can grow
+    bool session_ended = false; // a SteamVR session just ended: the next one must be a new SteamVR
+};
+
+std::string current_executable() {
+    std::error_code error;
+    const auto path = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? std::string() : path.string();
+}
+
+frame_notify::ui::SettingsInfo read_settings(const frame_notify::system::Autostart& autostart) {
+    frame_notify::ui::SettingsInfo settings;
+    settings.version = FRAME_NOTIFY_VERSION;
+    const auto status = autostart.status();
+    settings.autostart_enabled = status.enabled;
+    if (status.enabled) {
+        settings.autostart_method =
+            status.method == frame_notify::system::AutostartMethod::kDesktopEntry ? "desktop" : "systemd";
+    }
+    return settings;
+}
+
+int run_autostart_command(std::string_view command) {
+    frame_notify::system::Autostart autostart(frame_notify::system::Autostart::default_options());
+    std::string error;
+    if (command == "--autostart-status") {
+        const auto status = autostart.status();
+        using frame_notify::system::AutostartMethod;
+        std::cout << (status.enabled ? "Autostart is on" : "Autostart is off");
+        if (status.enabled) {
+            std::cout << (status.method == AutostartMethod::kDesktopEntry ? " (desktop autostart entry)"
+                                                                          : " (systemd user service)");
         }
-    }
-
-    frame_notify::openvr::Runtime runtime;
-    if (!runtime.initialize()) {
-        return 1;
-    }
-
-    if (diagnostics_only) {
-        std::cout << "[OpenVR] Diagnostics completed successfully\n";
+        std::cout << '\n';
+        if (!status.detail.empty()) std::cout << status.detail << '\n';
         return 0;
     }
+    if (command == "--enable-autostart") {
+        if (!autostart.enable(error)) {
+            std::cerr << "Could not turn autostart on: " << error << '\n';
+            return 1;
+        }
+        std::cout << "Autostart is on: Frame Notify starts by itself when the Frame starts.\n";
+        return 0;
+    }
+    if (!autostart.disable(error)) {
+        std::cerr << "Could not turn autostart off: " << error << '\n';
+        return 1;
+    }
+    std::cout << "Autostart is off. A running Frame Notify keeps running until you stop it.\n";
+    return 0;
+}
 
-    frame_notify::openvr::Dashboard dashboard;
-    if (!dashboard.create(runtime.overlay())) {
+// `--probe-steamvr`: is SteamVR running? Answered by the exit code (0 yes, 1 no, 2 cannot tell);
+// the background program asks this of a short-lived copy of itself (see VrSession).
+int probe_steamvr() {
+    std::string detail;
+    switch (frame_notify::openvr::Runtime::probe(detail)) {
+    case frame_notify::openvr::SteamVrState::kRunning:
+        return 0;
+    case frame_notify::openvr::SteamVrState::kNotRunning:
         return 1;
+    case frame_notify::openvr::SteamVrState::kUnavailable:
+        break;
     }
+    std::cout << detail;
+    return 2;
+}
 
-    frame_notify::openvr::NativeNotification notification;
-    if (!notification.bind(runtime.notifications(), dashboard.main_handle())) {
-        return 1;
-    }
-    if (native_notification && !notification.show_test()) {
-        return 1;
-    }
+Outcome run(const Options& options, const std::string& executable, bool after_session, int attach_failures) {
+    using namespace frame_notify;
 
-    frame_notify::ipc::SocketServer socket_server;
-    if (!socket_server.start()) {
-        return 1;
-    }
+    ipc::SocketServer socket_server;
+    if (!socket_server.start()) return {false, 1, 0, false};
     const int maximum_notifications =
         retention_setting("FRAME_NOTIFY_MAX_NOTIFICATIONS", 20, 1, 50);
     const int maximum_age_days = retention_setting("FRAME_NOTIFY_MAX_AGE_DAYS", 30, 1, 365);
-    frame_notify::history::Store history(static_cast<std::size_t>(maximum_notifications),
-                                         maximum_age_days);
-    if (!history.initialize() || !dashboard.set_history(make_dashboard_history(history))) {
-        return 1;
-    }
+    history::Store history(static_cast<std::size_t>(maximum_notifications), maximum_age_days);
+    if (!history.initialize()) return {false, 1, 0, false};
     std::cout << "[History] Retention: " << maximum_notifications << " notification(s), "
               << maximum_age_days << " day(s)\n";
     // Times on the cards come from this clock and zone; if they look wrong, compare this line
     // with the real local time (`date` on the Frame).
     std::cout << "[UI] Local time: "
-              << frame_notify::ui::describe_local_time(
-                     std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count())
+              << ui::describe_local_time(std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count())
               << '\n';
 
     std::signal(SIGINT, handle_signal);
@@ -224,13 +286,14 @@ int main(int argc, char* argv[]) {
 
     // The Bluetooth helper pairs and listens to the iPhone. It is optional: without it, or when
     // it cannot run, the panel says so and notifications still arrive through the local socket.
-    frame_notify::bluetooth::PhoneLink phone_link;
+    bluetooth::PhoneLink phone_link;
     std::string phone_state;  // the helper's last state, to announce changes once
-    if (!use_bluetooth) {
+    ui::PhoneInfo phone_info;
+    if (!options.use_bluetooth) {
         std::cout << "[Bluetooth] Disabled; not starting the iPhone helper\n";
-        dashboard.set_phone(make_unavailable_phone_info("Bluetooth is turned off for this run."));
+        phone_info = make_unavailable_phone_info("Bluetooth is turned off for this run.");
     } else {
-        auto helper_command = frame_notify::bluetooth::default_helper_command();
+        auto helper_command = bluetooth::default_helper_command();
         if (helper_command.empty()) {
             std::cerr << "[Bluetooth] Could not find scripts/ancs_bridge.py; set "
                          "FRAME_NOTIFY_BRIDGE to its path\n";
@@ -240,31 +303,49 @@ int main(int argc, char* argv[]) {
             std::cout << '\n';
         }
         phone_link.start(std::move(helper_command));
-        dashboard.set_phone(make_phone_info(phone_link.status()));
+        phone_info = make_phone_info(phone_link.status());
     }
-
     const auto send_to_phone = [&](std::string_view command,
                                    const std::vector<std::pair<std::string, std::string>>& fields = {}) {
-        if (!use_bluetooth || !phone_link.send(command, fields)) {
+        if (!options.use_bluetooth || !phone_link.send(command, fields)) {
             std::cerr << "[Bluetooth] The helper is not running; dropped command '" << command << "'\n";
         }
     };
 
-    std::cout << "[Dashboard] Phone Notifications is ready\n"
-              << "[Dashboard] Open the SteamVR Dashboard and select the entry; press Ctrl+C to stop\n";
+    system::Autostart autostart(system::Autostart::default_options());
+    ui::SettingsInfo settings = read_settings(autostart);
 
+    // SteamVR: the panel and the toasts exist only while SteamVR runs. A pause before the first
+    // attempt grows with each failed connection, so a SteamVR that cannot be used is not hammered.
+    openvr::VrSession::Options session_options;
+    session_options.executable = executable;
+    session_options.plan.wait_for_shutdown_first = after_session;
+    if (attach_failures > 0) {
+        session_options.plan.initial_delay = std::chrono::seconds(
+            std::min(60, 5 << std::min(attach_failures - 1, 4)));
+    }
+    openvr::VrSession vr(session_options);
+    bool test_toast_pending = options.native_notification;
+
+    std::cout << "[Frame Notify] " << FRAME_NOTIFY_VERSION
+              << " is running in the background; the dashboard entry appears when SteamVR is running\n";
+
+    Outcome outcome;
     while (keep_running.load()) {
         if (phone_link.poll()) {
             const auto previous_state = phone_state;
             phone_state = phone_link.status().state;
-            const auto phone = make_phone_info(phone_link.status());
-            dashboard.set_phone(phone);
-            if (phone_state != previous_state && !dashboard.visible()) {
-                if (const auto text = pairing_toast(phone); !text.empty()) {
-                    notification.show(notification_user_value("phone-pairing"), text);
+            phone_info = make_phone_info(phone_link.status());
+            if (vr.attached()) {
+                vr.dashboard().set_phone(phone_info);
+                if (phone_state != previous_state && !vr.dashboard().visible()) {
+                    if (const auto text = pairing_toast(phone_info); !text.empty()) {
+                        vr.notification().show(notification_user_value("phone-pairing"), text);
+                    }
                 }
             }
         }
+
         for (auto& incoming : socket_server.poll()) {
             incoming.received_at = std::chrono::duration_cast<std::chrono::seconds>(
                                        std::chrono::system_clock::now().time_since_epoch())
@@ -280,103 +361,230 @@ int main(int argc, char* argv[]) {
 
             const auto& current = history.notifications().front();
             std::cout << "[IPC] Notification id=" << current.id << " app=" << current.app
-                      << " toast=" << (show_toast ? "yes" : "no")
-                      << " dashboard=" << (dashboard.visible() ? "open" : "closed") << '\n';
-            if (!dashboard.set_history(make_dashboard_history(history))) {
+                      << " toast=" << (show_toast ? "yes" : "no") << " dashboard="
+                      << (!vr.attached() ? "no-steamvr" : vr.dashboard().visible() ? "open" : "closed")
+                      << '\n';
+            if (!vr.attached()) continue;   // kept in the history for when SteamVR is up
+            if (!vr.dashboard().set_history(make_dashboard_history(history))) {
                 std::cerr << "[Dashboard] Failed to refresh notification history\n";
             }
             // Older senders may pass a bundle identifier as the app; show a readable name.
-            const std::string app_name =
-                frame_notify::ui::resolve_app_style(current.app, current.app_id).name;
+            const std::string app_name = ui::resolve_app_style(current.app, current.app_id).name;
             std::string toast = single_line(app_name) + "\n" + single_line(current.title);
             if (current.message != current.title) toast += ": " + single_line(current.message);
-            if (show_toast && !notification.show(notification_user_value(current.id), toast)) {
+            if (show_toast && !vr.notification().show(notification_user_value(current.id), toast)) {
                 std::cerr << "[Notification] Native toast failed for id=" << current.id << '\n';
             }
         }
-        const auto dashboard_actions = dashboard.poll_events();
-        bool history_changed = false;
-        for (const auto& action : dashboard_actions) {
-            switch (action.type) {
-            case frame_notify::openvr::DashboardActionType::MarkRead:
-                if (history.mark_read(action.notification_id)) {
-                    std::cout << "[History] Marked read id=" << action.notification_id << '\n';
-                    history_changed = true;
-                }
-                break;
-            case frame_notify::openvr::DashboardActionType::MarkAllRead:
-                if (const auto count = history.mark_all_read(); count != 0U) {
-                    std::cout << "[History] Marked " << count << " notification(s) read\n";
-                    history_changed = true;
-                }
-                break;
-            case frame_notify::openvr::DashboardActionType::Dismiss:
-                if (history.dismiss(action.notification_id)) {
-                    std::cout << "[History] Cleared local notification id="
-                              << action.notification_id << '\n';
-                    history_changed = true;
-                }
-                break;
-            case frame_notify::openvr::DashboardActionType::ClearAll:
-                if (const auto count = history.dismiss_all(); count != 0U) {
-                    std::cout << "[History] Cleared " << count << " local notification(s)\n";
-                    history_changed = true;
-                }
-                break;
-            case frame_notify::openvr::DashboardActionType::Exit:
-                std::cout << "[Dashboard] Close requested; stopping Frame Notify\n";
-                keep_running.store(false);
-                break;
-            case frame_notify::openvr::DashboardActionType::PairStart:
-                send_to_phone("pair");
-                break;
-            case frame_notify::openvr::DashboardActionType::PairCancel:
-                send_to_phone("cancel");
-                break;
-            case frame_notify::openvr::DashboardActionType::PairConfirm:
-                send_to_phone("confirm");
-                break;
-            case frame_notify::openvr::DashboardActionType::PairReject:
-                send_to_phone("reject");
-                break;
-            case frame_notify::openvr::DashboardActionType::PairAnyway:
-                send_to_phone("pair_anyway");
-                break;
-            case frame_notify::openvr::DashboardActionType::RemoveConflict:
-                send_to_phone("remove_conflict", {{"address", action.argument}});
-                break;
-            case frame_notify::openvr::DashboardActionType::PairDismiss:
-                send_to_phone("dismiss");
-                break;
-            case frame_notify::openvr::DashboardActionType::ForgetPhone:
-                send_to_phone("forget");
-                break;
-            case frame_notify::openvr::DashboardActionType::PowerOnBluetooth:
-                send_to_phone("power_on");
-                break;
-            case frame_notify::openvr::DashboardActionType::RetryBluetooth:
-                if (use_bluetooth) phone_link.retry();
+
+        if (!vr.attached()) {
+            const bool connected = vr.poll(std::chrono::steady_clock::now());
+            if (vr.failed()) {
+                std::cerr << "[VR] Could not use SteamVR; starting over shortly\n";
+                outcome = {true, 0, attach_failures + 1, false};
                 break;
             }
-        }
-        if (history_changed && !dashboard.set_history(make_dashboard_history(history), false)) {
-            std::cerr << "[Dashboard] Failed to refresh notification state\n";
-        }
-        vr::VREvent_t event{};
-        while (runtime.system()->PollNextEvent(&event, sizeof(event))) {
-            log_runtime_event(event);
-            // Bring the times up to date while the dashboard is still opening, not after it shows.
-            if (event.eventType == vr::VREvent_DashboardActivated) dashboard.refresh();
-            if (event.eventType == vr::VREvent_Quit) {
-                std::cout << "[OpenVR] SteamVR requested shutdown\n";
-                runtime.system()->AcknowledgeQuit_Exiting();
-                keep_running.store(false);
+            if (connected) {
+                vr.dashboard().set_history(make_dashboard_history(history));
+                vr.dashboard().set_phone(phone_info);
+                vr.dashboard().set_settings(settings);
+                if (test_toast_pending) {
+                    vr.notification().show_test();
+                    test_toast_pending = false;
+                }
+                std::cout << "[Dashboard] Phone Notifications is ready\n"
+                          << "[Dashboard] Open the SteamVR Dashboard and select the entry\n";
+            }
+        } else {
+            auto& dashboard = vr.dashboard();
+            bool history_changed = false;
+            for (const auto& action : dashboard.poll_events()) {
+                switch (action.type) {
+                case DashboardActionType::MarkRead:
+                    if (history.mark_read(action.notification_id)) {
+                        std::cout << "[History] Marked read id=" << action.notification_id << '\n';
+                        history_changed = true;
+                    }
+                    break;
+                case DashboardActionType::MarkAllRead:
+                    if (const auto count = history.mark_all_read(); count != 0U) {
+                        std::cout << "[History] Marked " << count << " notification(s) read\n";
+                        history_changed = true;
+                    }
+                    break;
+                case DashboardActionType::Dismiss:
+                    if (history.dismiss(action.notification_id)) {
+                        std::cout << "[History] Cleared local notification id="
+                                  << action.notification_id << '\n';
+                        history_changed = true;
+                    }
+                    break;
+                case DashboardActionType::ClearAll:
+                    if (const auto count = history.dismiss_all(); count != 0U) {
+                        std::cout << "[History] Cleared " << count << " local notification(s)\n";
+                        history_changed = true;
+                    }
+                    break;
+                case DashboardActionType::Exit:
+                    // The close button on the panel's control bar. The program itself keeps
+                    // running; only the dashboard entry goes, until SteamVR starts again.
+                    std::cout << "[Dashboard] Close requested; leaving SteamVR until it restarts\n";
+                    outcome = {true, 0, 0, true};
+                    break;
+                case DashboardActionType::PairStart:
+                    send_to_phone("pair");
+                    break;
+                case DashboardActionType::PairCancel:
+                    send_to_phone("cancel");
+                    break;
+                case DashboardActionType::PairConfirm:
+                    send_to_phone("confirm");
+                    break;
+                case DashboardActionType::PairReject:
+                    send_to_phone("reject");
+                    break;
+                case DashboardActionType::PairAnyway:
+                    send_to_phone("pair_anyway");
+                    break;
+                case DashboardActionType::RemoveConflict:
+                    send_to_phone("remove_conflict", {{"address", action.argument}});
+                    break;
+                case DashboardActionType::PairDismiss:
+                    send_to_phone("dismiss");
+                    break;
+                case DashboardActionType::ForgetPhone:
+                    send_to_phone("forget");
+                    break;
+                case DashboardActionType::PowerOnBluetooth:
+                    send_to_phone("power_on");
+                    break;
+                case DashboardActionType::RetryBluetooth:
+                    if (options.use_bluetooth) phone_link.retry();
+                    break;
+                case DashboardActionType::ToggleAutostart: {
+                    const bool was_enabled = settings.autostart_enabled;
+                    std::string error;
+                    const bool done = was_enabled ? autostart.disable(error) : autostart.enable(error);
+                    settings = read_settings(autostart);
+                    if (!done) {
+                        settings.message = std::string("Could not turn autostart ") +
+                                           (was_enabled ? "off: " : "on: ") + error;
+                        std::cerr << "[Autostart] " << settings.message << '\n';
+                    } else {
+                        std::cout << "[Autostart] Turned " << (was_enabled ? "off" : "on") << '\n';
+                    }
+                    dashboard.set_settings(settings);
+                    break;
+                }
+                }
+            }
+            if (outcome.restart) break;
+            if (history_changed && !dashboard.set_history(make_dashboard_history(history), false)) {
+                std::cerr << "[Dashboard] Failed to refresh notification state\n";
+            }
+
+            vr::VREvent_t event{};
+            while (vr.runtime().system()->PollNextEvent(&event, sizeof(event))) {
+                log_runtime_event(event);
+                // Bring the times up to date while the dashboard is still opening, not after it shows.
+                if (event.eventType == vr::VREvent_DashboardActivated) dashboard.refresh();
+                if (event.eventType == vr::VREvent_Quit) {
+                    std::cout << "[OpenVR] SteamVR requested shutdown\n";
+                    vr.runtime().system()->AcknowledgeQuit_Exiting();
+                    outcome = {true, 0, 0, true};
+                    break;
+                }
+            }
+            if (outcome.restart) break;
+            if (dashboard.broken()) {
+                std::cerr << "[VR] SteamVR stopped answering; starting over\n";
+                outcome = {true, 0, 0, true};
                 break;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
 
+    // Overlays first, while OpenVR is still connected; then the helper.
+    vr.detach();
     phone_link.stop();
-    return 0;
+    return outcome;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    // Logs go to a terminal or to the journal; either way each line should appear when it is written.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    Options options;
+    options.use_bluetooth = !environment_flag("FRAME_NOTIFY_NO_BLUETOOTH");
+    std::vector<std::string> arguments;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument{argv[index]};
+        if (argument == "--probe-steamvr") {
+            return probe_steamvr();
+        }
+        if (argument == "--version") {
+            std::cout << "frame-notify " << FRAME_NOTIFY_VERSION << '\n';
+            return 0;
+        }
+        if (argument == "--enable-autostart" || argument == "--disable-autostart" ||
+            argument == "--autostart-status") {
+            return run_autostart_command(argument);
+        }
+        if (argument == "--diagnostics-only") {
+            options.diagnostics_only = true;
+        } else if (argument == "--native-notification") {
+            options.native_notification = true;
+            continue;   // a test for one run only: not repeated when the program starts over
+        } else if (argument == "--no-bluetooth") {
+            options.use_bluetooth = false;
+        } else if (argument == "--help" || argument == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            std::cerr << "Unknown option: " << argument << "\n";
+            print_usage(argv[0]);
+            return 2;
+        }
+        arguments.emplace_back(argument);
+    }
+
+    if (options.diagnostics_only) {
+        frame_notify::openvr::Runtime runtime;
+        if (!runtime.initialize()) return 1;
+        std::cout << "[OpenVR] Diagnostics completed successfully\n";
+        return 0;
+    }
+
+    frame_notify::system::SingleInstance instance;
+    if (!instance.acquire(frame_notify::system::SingleInstance::default_directory())) {
+        std::cerr << "[Frame Notify] Not starting: " << instance.error();
+        if (instance.holder() > 0) std::cerr << " (process " << instance.holder() << ")";
+        std::cerr << ".\nIf it was started by the background service, stop that first with "
+                     "`systemctl --user stop frame-notify`.\n";
+        return 1;
+    }
+
+    const std::string executable = current_executable();
+    const bool after_session = environment_flag(kAfterSessionVariable);
+    const int attach_failures = environment_number(kAttachFailuresVariable, 0);
+    const Outcome outcome = run(options, executable, after_session, attach_failures);
+    if (!outcome.restart) return outcome.exit_code;
+
+    // A SteamVR session is over. Start over as a fresh process, which can connect to the next
+    // SteamVR cleanly; everything the old process held has been released by now.
+    setenv(kAfterSessionVariable, outcome.session_ended ? "1" : "0", 1);
+    setenv(kAttachFailuresVariable, std::to_string(outcome.attach_failures).c_str(), 1);
+    std::vector<std::string> restart_arguments = {executable};
+    restart_arguments.insert(restart_arguments.end(), arguments.begin(), arguments.end());
+    std::vector<char*> restart_argv;
+    for (auto& item : restart_arguments) restart_argv.push_back(item.data());
+    restart_argv.push_back(nullptr);
+    std::cout << "[Frame Notify] Starting over\n";
+    std::cout.flush();
+    if (!executable.empty()) execv(executable.c_str(), restart_argv.data());
+    std::cerr << "[Frame Notify] Could not start over; exiting\n";
+    return 1;
 }

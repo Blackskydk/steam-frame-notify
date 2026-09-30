@@ -49,7 +49,7 @@ cmake --build "${build_dir}" --parallel
 ctest --test-dir "${build_dir}" --output-on-failure
 
 echo
-echo "Built: ${build_dir}/frame-notify-test"
+echo "Built: ${build_dir}/frame-notify"
 if command -v file >/dev/null 2>&1; then
-    file "${build_dir}/frame-notify-test"
+    file "${build_dir}/frame-notify"
 fi

@@ -319,6 +319,12 @@ int main() {
         EXPECT(chip.last < clear.first);                                     // they never overlap
         EXPECT(clear.first - chip.last < 40);                                // and sit side by side
         EXPECT(chip.last - chip.first > 150);                                // wide enough to tap
+        // The gear sits at the right edge, after "Clear all", without overlapping anything.
+        const HeaderSpan gear = header_span(view, HistoryHitKind::kSettings);
+        EXPECT(gear.found() && clear.last < gear.first && gear.last > 1200 && gear.last < 1250);
+        EXPECT(gear.last - gear.first > 40);                                 // big enough to hit with a controller
+        EXPECT(view.hit_test((gear.first + gear.last) / 2, 70, 0)->kind == HistoryHitKind::kSettings);
+        EXPECT(!view.hit_test(gear.last + 30, 78, 0));                       // nothing beyond it
         EXPECT(view.hit_test(chip.first, 78, 0)->kind == HistoryHitKind::kPhoneChip);
         EXPECT(!view.hit_test(chip.first - 40, 78, 0));                      // empty header beside it
         EXPECT(view.hit_test((chip.first + chip.last) / 2, 70, 0)->kind == HistoryHitKind::kPhoneChip);
@@ -372,7 +378,9 @@ int main() {
         EXPECT(!unpaired_empty.hit_test(640, 452 + 68 + 40, 0));
         EXPECT(452 + 68 < viewport * 2 / 3);                                   // well clear of the lower edge
         const HeaderSpan empty_chip = header_span(unpaired_empty, HistoryHitKind::kPhoneChip);
-        EXPECT(empty_chip.found() && empty_chip.last > 1150);
+        EXPECT(empty_chip.found() && empty_chip.last > 1100);
+        const HeaderSpan empty_gear = header_span(unpaired_empty, HistoryHitKind::kSettings);
+        EXPECT(empty_gear.found() && empty_chip.last < empty_gear.first);   // the gear stays with nothing to clear
         EXPECT(!header_span(unpaired_empty, HistoryHitKind::kClearAll).found());
 
         for (const char* state : {"connected", "connecting", "needs_repair", "no_bluetooth", "pair_open",

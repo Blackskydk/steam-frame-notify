@@ -1,7 +1,9 @@
 # Frame Notify
 
-Frame Notify is an open-source, windowless OpenVR experiment for Valve Steam Frame. The current
-prototype implements:
+Frame Notify shows the notifications of your iPhone inside SteamVR on a Valve Steam Frame: a toast
+when one arrives, and a **Phone Notifications** panel in the dashboard with the recent ones. You pair
+the iPhone from the panel, in the headset. Frame Notify is an open-source, windowless OpenVR
+overlay; the current version implements:
 
 1. OpenVR initialization as `VRApplication_Overlay`, with runtime diagnostics.
 2. A native SteamVR dashboard entry named **Phone Notifications**, created through the public
@@ -23,14 +25,56 @@ prototype implements:
    Notify starts a small Bluetooth helper itself, shows the phone's status in the panel's header,
    and pairs a phone from the panel, including the code comparison. The helper also asks the
    phone for each app's real display name ("Messages", "ntfy", ...).
+10. Plug-and-play installation: one command installs a prebuilt release for the current user, and
+    Frame Notify then starts with the Frame and keeps running in the background. It keeps the iPhone
+    connected and collects notifications whether SteamVR is running or not, and the panel and toasts
+    appear whenever SteamVR is. Autostart can also be switched in the panel's Settings.
 
 The Bluetooth helper has been verified on a physical iPhone and Steam Frame. See
 [the Bluetooth and ANCS guide](docs/ancs.md) and [the API review](docs/openvr-api-notes.md).
 
+## Install on the Steam Frame
+
+In a terminal on the Frame (desktop mode, or over SSH), run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Blackskydk/steam-frame-notify/main/scripts/install.sh | bash
+```
+
+That downloads the latest release, checks its checksum, installs it for your user (no root, nothing
+outside your home directory), and sets Frame Notify up to **start by itself when the Frame starts and
+keep running in the background**, waiting for SteamVR. To update, run the same command again.
+
+Then start SteamVR, open the dashboard, select **Phone Notifications** and tap **Pair an iPhone**
+(see [Pair an iPhone](#pair-an-iphone-and-receive-its-notifications)). The iPhone Bluetooth helper
+needs Python 3 with `dbus-python` and PyGObject, which the installer checks for and tells you about;
+everything else works without them.
+
+| To | Do |
+| --- | --- |
+| Turn starting with the Frame on or off | The gear in the panel's header (Settings), or `frame-notify --enable-autostart` / `--disable-autostart` |
+| See whether it starts with the Frame | `frame-notify --autostart-status` |
+| Watch what it is doing | `journalctl --user -u frame-notify -f` |
+| Stop it for now | `systemctl --user stop frame-notify` |
+| Remove it | `~/.local/share/frame-notify/install.sh --uninstall` (add `--purge` to delete the notification history and the remembered phone too) |
+
+How it runs: the program is a systemd *user* service (`~/.config/systemd/user/frame-notify.service`),
+so it starts when your user session does, which is at boot on the Frame, and is restarted if it
+crashes. Where there is no systemd user manager it uses a desktop autostart entry instead. While
+SteamVR is not running it only keeps the iPhone connection and the history; it asks now and then
+whether SteamVR is up, never starts SteamVR itself, and shows the panel as soon as SteamVR runs. When
+SteamVR quits it starts over and waits for the next time. The close button on the panel's control bar
+only removes the dashboard entry until SteamVR restarts; it does not stop Frame Notify.
+
+If you would rather build it yourself, see [Build on Steam Frame](#build-on-steam-frame).
+
 ## Safety and scope
 
 The overlay runs as the current user. It does not modify SteamOS, BlueZ configuration, FFmpeg,
-SteamVR, system libraries, or services. It opens no X11 or Wayland window.
+SteamVR, or system libraries, and it opens no X11 or Wayland window. The installer writes only in
+your home directory (`~/.local/share/frame-notify`, a link in `~/.local/bin`, and, for autostart, a
+user service file in `~/.config/systemd/user`); `install.sh --uninstall` removes all of it. It never
+starts SteamVR.
 
 The Bluetooth helper (`scripts/ancs_bridge.py --service`, started and stopped by Frame Notify)
 talks only to the one phone you paired through the panel, which it remembers in `phone.json` next
@@ -71,16 +115,22 @@ fallback needs Git/network access but still installs nothing system-wide.
 Output:
 
 ```text
-~/frame-notify/build-frame/frame-notify-test
+~/frame-notify/build-frame/frame-notify
 ```
 
 ## Run on Steam Frame
 
-First prove initialization and inspect the reported runtime path/version:
+This section is for running a build from the source tree by hand. If Frame Notify is installed and
+running in the background (see above), stop it first with `systemctl --user stop frame-notify`: only
+one can run at a time, and a second one says so and exits. The development scripts
+(`push-frame.ps1 -Run`) stop the service for you.
+
+Frame Notify waits for SteamVR when it is not running, and connects when it starts. First prove
+initialization and inspect the reported runtime path/version:
 
 ```bash
 cd ~/frame-notify
-./build-frame/frame-notify-test --diagnostics-only
+./build-frame/frame-notify --diagnostics-only
 ```
 
 Expected fields include:
@@ -92,11 +142,11 @@ Expected fields include:
 [OpenVR] Application type: Overlay
 ```
 
-Only after that succeeds, start the dashboard experiment and leave it running:
+Only after that succeeds, start Frame Notify and leave it running:
 
 ```bash
 cd ~/frame-notify
-./build-frame/frame-notify-test
+./build-frame/frame-notify
 ```
 
 In the headset, open the SteamVR Dashboard and select **Phone Notifications**. SteamVR decides its
@@ -107,9 +157,9 @@ the trigger anywhere on the panel and drag; let go while moving and the list kee
 touching it stops it. A quick tap, without dragging, acts on what is under the pointer: on a card
 it expands a long message (a small chevron marks cards that have more text) and a second tap
 collapses it. The round **×** on a card clears that notification and **Clear all** in the header
-clears every visible one. The SteamVR control bar below the panel can be grabbed to move
-the window and includes a close button; using close stops Frame Notify and removes the dashboard
-entry until the process is started again.
+clears every visible one. The gear in the header opens the settings. The SteamVR control bar below
+the panel can be grabbed to move the window and includes a close button; using close removes the
+dashboard entry until SteamVR restarts, and Frame Notify itself keeps running.
 Clearing is persisted locally but does not dismiss the corresponding notification on the phone.
 
 The panel needs the bundled Inter fonts. The build copies them to `build-frame/fonts/`; the program
@@ -121,7 +171,7 @@ To ask SteamVR to create a real native test notification, start the application 
 
 ```bash
 cd ~/frame-notify
-./build-frame/frame-notify-test --native-notification
+./build-frame/frame-notify --native-notification
 ```
 
 The program prints the exact `CreateNotification` result and notification ID, then remains running
@@ -170,7 +220,7 @@ for example `[UI] Local time: 2026-09-30 09:41:05 (UTC+02:00)`. If it is wrong, 
 Notify with the zone you want, which changes nothing else on the Frame:
 
 ```bash
-TZ=Europe/Berlin ./build-frame/frame-notify-test
+TZ=Europe/Berlin ./build-frame/frame-notify
 ```
 
 or fix the Frame's own time zone in its system settings (with sudo,
@@ -191,7 +241,7 @@ launching the application:
 ```bash
 export FRAME_NOTIFY_MAX_NOTIFICATIONS=30
 export FRAME_NOTIFY_MAX_AGE_DAYS=14
-./build-frame/frame-notify-test
+./build-frame/frame-notify
 ```
 
 Allowed ranges are 1–50 notifications and 1–365 days. Stored records contain the notification ID,
@@ -319,9 +369,10 @@ FRAME_ALLOW_NON_AARCH64=1 bash ./scripts/build-frame.sh
 
 The automated tests cover the vector rasterizer, TrueType parsing and kerning, text wrapping,
 app names and colours, time formatting, panel layout and hit-testing, the pairing screens, message
-parsing, history persistence, the supervision of the Bluetooth helper process, and the ANCS
-protocol and pairing service (against a fake BlueZ). SteamVR and BlueZ integration themselves must
-be verified on the physical Frame.
+parsing, history persistence, the supervision of the Bluetooth helper process, the single-instance
+lock, autostart management (against a fake `systemctl`), when the program connects to SteamVR, the
+packaging and install scripts, and the ANCS protocol and pairing service (against a fake BlueZ).
+SteamVR and BlueZ integration themselves must be verified on the physical Frame.
 
 ## License
 

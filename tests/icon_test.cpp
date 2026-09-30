@@ -28,6 +28,26 @@ int main() {
         return 1;
     }
 
+    // The gear is a ring of teeth around a hole: ink all around, none at the very centre.
+    {
+        frame_notify::ui::Canvas canvas(64, 64, {0, 0, 0, 255});
+        frame_notify::ui::draw_gear(canvas, 32.0F, 32.0F, 48.0F, {255, 255, 255, 255});
+        const auto gear = canvas.take_pixels();
+        const auto brightness = [&](int x, int y) {
+            return static_cast<int>(gear[(static_cast<std::size_t>(y) * 64U + static_cast<std::size_t>(x)) * 4U]);
+        };
+        if (brightness(32, 32) > 30 || brightness(32 + 13, 32) < 200 || brightness(32, 32 - 13) < 200 ||
+            brightness(2, 2) > 10) {
+            std::cerr << "The gear glyph has the wrong shape\n";
+            return 1;
+        }
+        // The teeth stick out past the body, at the angles of a compass and its diagonals.
+        if (brightness(32 + 22, 32) < 100 || brightness(32 + 16, 32 + 16) < 100 || brightness(32 + 22, 32 + 9) > 60) {
+            std::cerr << "The gear glyph has no teeth where expected\n";
+            return 1;
+        }
+    }
+
     // The red badge appears only when something is unread, and it shows the count.
     const auto red_pixels = [](const std::vector<std::uint8_t>& pixels) {
         std::size_t count = 0;

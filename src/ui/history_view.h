@@ -40,6 +40,7 @@ enum class HistoryHitKind {
     kClearAll,  // the header button
     kPhoneChip,   // the phone status in the header: opens the phone screen
     kPairPrompt,  // the "Pair an iPhone" button shown while nothing is paired
+    kSettings,    // the gear in the header
 };
 
 struct HistoryHit {
@@ -106,6 +107,7 @@ private:
     std::vector<Row> rows_;
     Area chip_;                      // the phone status in the header
     Area prompt_;                    // "Pair an iPhone" in the empty state, if shown
+    Area settings_;                  // the gear in the header
     std::string chip_label_;
     Tone chip_tone_ = Tone::kNeutral;
     int content_height_ = static_cast<int>(kHistoryViewHeight);

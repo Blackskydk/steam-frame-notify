@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <string>
 
 namespace frame_notify::openvr {
 
@@ -13,6 +14,23 @@ Runtime::~Runtime() {
         vr::VR_Shutdown();
         std::cout << "[OpenVR] Runtime shut down\n";
     }
+}
+
+SteamVrState Runtime::probe(std::string& detail) {
+    if (!vr::VR_IsRuntimeInstalled()) {
+        detail = "No registered OpenVR runtime was found";
+        return SteamVrState::kUnavailable;
+    }
+    vr::EVRInitError error = vr::VRInitError_None;
+    vr::VR_Init(&error, vr::VRApplication_Background);
+    if (error == vr::VRInitError_None) {
+        vr::VR_Shutdown();
+        return SteamVrState::kRunning;
+    }
+    if (error == vr::VRInitError_Init_NoServerForBackgroundApp) return SteamVrState::kNotRunning;
+    detail = std::string(vr::VR_GetVRInitErrorAsSymbol(error)) + " (" +
+             vr::VR_GetVRInitErrorAsEnglishDescription(error) + ")";
+    return SteamVrState::kUnavailable;
 }
 
 bool Runtime::initialize() {

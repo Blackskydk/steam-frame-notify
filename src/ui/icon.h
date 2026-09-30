@@ -16,6 +16,8 @@ std::vector<std::uint8_t> make_notification_icon(std::uint32_t size, int unread_
 // Vector glyphs shared by the tile and the notification panel. `height` is the glyph's full
 // height in pixels; everything is drawn centred on the given point.
 void draw_bell(Canvas& canvas, float center_x, float center_y, float height, Color color);
+// A cog with eight teeth and a hole in the middle; `diameter` is the tips' span.
+void draw_gear(Canvas& canvas, float center_x, float center_y, float diameter, Color color);
 void draw_cross(Canvas& canvas, float center_x, float center_y, float arm, float thickness,
                 Color color);
 void draw_chevron(Canvas& canvas, float center_x, float center_y, float half_width,

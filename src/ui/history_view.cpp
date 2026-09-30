@@ -50,6 +50,7 @@ constexpr int kClearButtonHitPadding = 10;
 constexpr int kChipHeight = 52;
 constexpr int kChipHitPadding = 6;  // less than the gap, so it never overlaps "Clear all"
 constexpr int kChipGap = 16;
+constexpr int kSettingsButtonSize = 52;
 constexpr int kChipMaximumText = 330;
 constexpr int kPromptWidth = 330;
 constexpr int kPromptHeight = 68;
@@ -88,8 +89,12 @@ Point dismiss_center(int card_top) {
             static_cast<float>(card_top + kAvatarTop + kDismissDiameter / 2)};
 }
 
+int settings_button_left() {
+    return static_cast<int>(kHistoryViewWidth) - kMargin - kSettingsButtonSize;
+}
+
 int clear_button_left() {
-    return static_cast<int>(kHistoryViewWidth) - kMargin - kClearButtonWidth;
+    return settings_button_left() - kChipGap - kClearButtonWidth;
 }
 
 // What the empty panel says, which depends on whether there is a phone to wait for.
@@ -204,10 +209,10 @@ void HistoryView::set(std::vector<HistoryNotification> notifications, HistoryCon
     chip_tone_ = chip.tone;
     const int chip_width = static_cast<int>(std::lround(typography.measure(chip_label_, kButtonFont))) +
                            26 + 12 + 12 + 28;
-    const int chip_right = notifications_.empty()
-                               ? static_cast<int>(kHistoryViewWidth) - kMargin
-                               : clear_button_left() - kChipGap;
+    const int chip_right = (notifications_.empty() ? settings_button_left() : clear_button_left()) - kChipGap;
     chip_ = {chip_right - chip_width, kClearButtonTop, chip_right, kClearButtonTop + kChipHeight};
+    settings_ = {settings_button_left(), kClearButtonTop, settings_button_left() + kSettingsButtonSize,
+                 kClearButtonTop + kSettingsButtonSize};
     prompt_ = {};
     if (notifications_.empty() && empty_state_for(context_.phone).prompt) {
         const int left = (static_cast<int>(kHistoryViewWidth) - kPromptWidth) / 2;
@@ -266,6 +271,9 @@ std::optional<HistoryHit> HistoryView::hit_test(int x, int y, int scroll_offset)
     const int content_y = y + std::clamp(scroll_offset, 0, maximum_scroll_offset());
 
     if (content_y < kHeaderHeight) {
+        if (settings_.contains(x, content_y, kChipHitPadding)) {
+            return HistoryHit{HistoryHitKind::kSettings, 0};
+        }
         if (chip_.contains(x, content_y, kChipHitPadding)) {
             return HistoryHit{HistoryHitKind::kPhoneChip, 0};
         }
@@ -359,6 +367,17 @@ std::vector<std::uint8_t> HistoryView::render_content() const {
         canvas.fill_circle(left + 26.0F + 6.0F, (top + bottom) / 2.0F, 6.0F, tone);
         canvas.draw_text(left + 26.0F + 12.0F + 12.0F, (top + bottom) / 2.0F + typography.cap_height(kButtonFont) / 2.0F,
                          chip_label_, kButtonFont, {214, 221, 238, 255});
+    }
+
+    // The settings button: a round button with a gear.
+    {
+        const auto left = static_cast<float>(settings_.left);
+        const auto top = static_cast<float>(settings_.top);
+        const auto right = static_cast<float>(settings_.right);
+        const auto bottom = static_cast<float>(settings_.bottom);
+        canvas.fill_rounded_rect(left, top, right, bottom, (bottom - top) / 2.0F, kButtonFill);
+        canvas.stroke_rounded_rect(left, top, right, bottom, (bottom - top) / 2.0F, 1.5F, kButtonBorder);
+        draw_gear(canvas, (left + right) / 2.0F, (top + bottom) / 2.0F, 28.0F, {176, 186, 208, 255});
     }
 
     // ---- Empty state ----

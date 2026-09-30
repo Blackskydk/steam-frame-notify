@@ -66,7 +66,7 @@ try {
     if ($Run -or $NativeNotification) {
         $runOption = if ($NativeNotification) { " --native-notification" } else { "" }
         $buildCommand += " && printf '\n[Run] Starting Frame Notify. Press Ctrl+C to stop.\n'" +
-            " && ./build-frame/frame-notify-test$runOption"
+            " && (systemctl --user stop frame-notify 2>/dev/null; true) && ./build-frame/frame-notify$runOption"
         & ssh.exe @sshOptions -t $FrameHost $buildCommand
     }
     else {
