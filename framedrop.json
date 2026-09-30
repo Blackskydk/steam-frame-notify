@@ -1,0 +1,9 @@
+{
+  "schema": "framedrop.install/v1",
+  "name": "Frame Notify",
+  "files": [
+    {
+      "url": "https://github.com/Blackskydk/steam-frame-notify/releases/latest/download/frame-notify-linux-aarch64.zip"
+    }
+  ]
+}

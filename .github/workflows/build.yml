@@ -23,7 +23,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake g++ git python3 file
+          sudo apt-get install -y --no-install-recommends cmake g++ git python3 file unzip
 
       - name: Work out the version
         id: version

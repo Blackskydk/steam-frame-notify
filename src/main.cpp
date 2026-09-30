@@ -6,6 +6,7 @@
 #include "openvr/runtime.h"
 #include "openvr/vr_session.h"
 #include "system/autostart.h"
+#include "system/process.h"
 #include "system/single_instance.h"
 #include "ui/app_style.h"
 #include "ui/phone_info.h"
@@ -259,6 +260,52 @@ int probe_steamvr() {
     }
     std::cout << detail;
     return 2;
+}
+
+bool is_informational(std::string_view argument) {
+    return argument == "--version" || argument == "--help" || argument == "-h" ||
+           argument == "--probe-steamvr" || argument == "--enable-autostart" ||
+           argument == "--disable-autostart" || argument == "--autostart-status";
+}
+
+// A release unpacked by a tool that just drops the files and launches the program (FrameDrop does
+// this, as a Steam title) carries a file named `setup-on-launch` beside the program. Launched, it
+// runs the installer that comes with it, which puts Frame Notify where it belongs and starts it as
+// a background service, and then ends. Installed copies and development builds have no such file
+// and run normally. The outcome goes to a log, because a Steam title shows no terminal.
+int set_up_on_launch(const std::filesystem::path& directory) {
+    const std::filesystem::path script = directory / "install.sh";
+    std::error_code error;
+    std::string report;
+    int exit_code = 1;
+    if (!std::filesystem::exists(script, error)) {
+        report = "Setup was asked for, but install.sh is not next to the program (" + directory.string() + ").\n";
+    } else {
+        const auto result = frame_notify::system::run_process({"bash", script.string()}, {},
+                                                               std::chrono::minutes(3), 65536);
+        report = result.started ? result.output + "\n"
+                                : "Could not run bash to install Frame Notify: " + result.output + "\n";
+        if (result.timed_out) report += "The installer did not finish in time.\n";
+        exit_code = result.started && result.exit_code == 0 && !result.timed_out ? 0 : 1;
+    }
+    report += exit_code == 0 ? "Setup finished.\n" : "Setup did not finish.\n";
+    std::cout << "[Setup] " << report;
+
+    const char* state_home = std::getenv("XDG_STATE_HOME");
+    const char* home = std::getenv("HOME");
+    const std::filesystem::path state =
+        state_home != nullptr && *state_home != '\0'
+            ? std::filesystem::path(state_home) / "frame-notify"
+            : (home != nullptr ? std::filesystem::path(home) / ".local" / "state" / "frame-notify"
+                               : std::filesystem::path());
+    if (!state.empty()) {
+        std::filesystem::create_directories(state, error);
+        if (std::FILE* log = std::fopen((state / "setup.log").string().c_str(), "w")) {
+            std::fputs(report.c_str(), log);
+            std::fclose(log);
+        }
+    }
+    return exit_code;
 }
 
 Outcome run(const Options& options, const std::string& executable, bool after_session, int attach_failures) {
@@ -516,6 +563,18 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
 int main(int argc, char* argv[]) {
     // Logs go to a terminal or to the journal; either way each line should appear when it is written.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    // Started by a tool that unpacked a release and launched it: set it up instead of running here.
+    {
+        const std::string self = current_executable();
+        bool informational = false;
+        for (int index = 1; index < argc; ++index) informational = informational || is_informational(argv[index]);
+        std::error_code error;
+        if (!informational && !self.empty() &&
+            std::filesystem::exists(std::filesystem::path(self).parent_path() / "setup-on-launch", error)) {
+            return set_up_on_launch(std::filesystem::path(self).parent_path());
+        }
+    }
 
     Options options;
     options.use_bluetooth = !environment_flag("FRAME_NOTIFY_NO_BLUETOOTH");
