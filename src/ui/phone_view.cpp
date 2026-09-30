@@ -371,6 +371,8 @@ PhoneScreen describe_phone_screen(const PhoneInfo& info, bool confirm_forget) {
 
 PhoneScreen describe_settings_screen(const SettingsInfo& info) {
     PhoneScreen screen;
+    const PhoneScreenButton check_button = button(
+        PhoneButton::kCheckForUpdates, info.update_state == "checking" ? "Checking\xE2\x80\xA6" : "Check for updates");
     screen.title = "Settings";
     screen.icon = PhoneIcon::kGear;
     screen.tone = info.autostart_enabled ? Tone::kGood : Tone::kNeutral;
@@ -384,13 +386,36 @@ PhoneScreen describe_settings_screen(const SettingsInfo& info) {
                                   "user service to use.");
         }
         screen.buttons = {button(PhoneButton::kClose, "Close", ButtonStyle::kPrimary),
-                          button(PhoneButton::kToggleAutostart, "Turn off autostart")};
+                          button(PhoneButton::kToggleAutostart, "Turn off autostart"), check_button};
     } else {
         screen.body = {"Start automatically: off",
                        "Frame Notify only runs until you stop it or the Frame restarts. Turn this on to "
                        "have it start with the Frame and wait in the background for SteamVR."};
         screen.buttons = {button(PhoneButton::kToggleAutostart, "Turn on autostart", ButtonStyle::kPrimary),
-                          button(PhoneButton::kClose, "Close")};
+                          check_button, button(PhoneButton::kClose, "Close")};
+    }
+
+    // The update check: what it found, or what it would do.
+    const std::string& update = info.update_state;
+    const std::string mine = info.version.empty() ? std::string() : " (you have " + info.version + ")";
+    if (update == "checking") {
+        screen.body.push_back("Checking for updates\xE2\x80\xA6");
+    } else if (update == "current") {
+        screen.body.push_back("You have the latest version" +
+                              (info.version.empty() ? std::string() : " (" + info.version + ")") + ".");
+    } else if (update == "available") {
+        screen.body.push_back("Version " + info.update_latest + " is available" + mine +
+                              ". To update, run the install command from the README again on the Frame.");
+        if (screen.tone == Tone::kNeutral) screen.tone = Tone::kActive;
+    } else if (update == "unknown") {
+        screen.body.push_back("The newest release is " + info.update_latest +
+                              ". This build has no release number to compare it with.");
+    } else if (update == "failed") {
+        screen.body.push_back(info.update_message.empty() ? std::string("The update check failed.")
+                                                          : info.update_message);
+    } else {
+        screen.body.push_back("Check for updates asks github.com for the newest release, only when you "
+                              "tap the button.");
     }
     if (!info.message.empty()) {
         screen.body.push_back(info.message);

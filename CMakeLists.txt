@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(frame-notify VERSION 0.1.0 LANGUAGES CXX)
+project(frame-notify VERSION 0.1.2 LANGUAGES CXX)
 
 set(FRAME_NOTIFY_VERSION "${PROJECT_VERSION}" CACHE STRING "The version the program reports (releases set it from the tag)")
 
@@ -132,7 +132,8 @@ add_library(frame_notify_core STATIC
     src/ipc/socket_server.cpp
     src/system/autostart.cpp
     src/system/process.cpp
-    src/system/single_instance.cpp)
+    src/system/single_instance.cpp
+    src/system/update_check.cpp)
 target_include_directories(frame_notify_core PUBLIC src)
 # The Bluetooth helper is a Python script; a binary started from another directory still finds it
 # here, in the source tree.
@@ -220,6 +221,10 @@ if(BUILD_TESTING)
     add_executable(frame-notify-attach-plan-test tests/attach_plan_test.cpp src/openvr/attach_plan.cpp)
     target_include_directories(frame-notify-attach-plan-test PRIVATE src)
     add_test(NAME steamvr-attach-plan COMMAND frame-notify-attach-plan-test)
+
+    add_executable(frame-notify-update-check-test tests/update_check_test.cpp)
+    target_link_libraries(frame-notify-update-check-test PRIVATE frame_notify_core)
+    add_test(NAME update-check COMMAND frame-notify-update-check-test)
 
     add_executable(frame-notify-system-test tests/system_test.cpp)
     target_link_libraries(frame-notify-system-test PRIVATE frame_notify_core)

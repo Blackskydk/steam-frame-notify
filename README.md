@@ -43,7 +43,8 @@ curl -fsSL https://raw.githubusercontent.com/Blackskydk/steam-frame-notify/main/
 
 That downloads the latest release, checks its checksum, installs it for your user (no root, nothing
 outside your home directory), and sets Frame Notify up to **start by itself when the Frame starts and
-keep running in the background**, waiting for SteamVR. To update, run the same command again.
+keep running in the background**, waiting for SteamVR. To update, run the same command again; the
+panel's Settings tells you when there is something to update to (see below).
 
 Then start SteamVR, open the dashboard, select **Phone Notifications** and tap **Pair an iPhone**
 (see [Pair an iPhone](#pair-an-iphone-and-receive-its-notifications)). The iPhone Bluetooth helper
@@ -52,11 +53,19 @@ everything else works without them.
 
 | To | Do |
 | --- | --- |
+| Find out whether a newer version exists | The gear in the panel's header (Settings), then **Check for updates** |
+| Update | Run the install command above again (or `~/.local/share/frame-notify/install.sh`, which downloads the newest release the same way) |
 | Turn starting with the Frame on or off | The gear in the panel's header (Settings), or `frame-notify --enable-autostart` / `--disable-autostart` |
 | See whether it starts with the Frame | `frame-notify --autostart-status` |
 | Watch what it is doing | `journalctl --user -u frame-notify -f` |
 | Stop it for now | `systemctl --user stop frame-notify` |
 | Remove it | `~/.local/share/frame-notify/install.sh --uninstall` (add `--purge` to delete the notification history and the remembered phone too) |
+
+**Check for updates** is the only thing the running program ever does on the internet, and it only
+does so when you tap it: it asks `github.com` which release of
+this repository is the newest (by following `releases/latest` with `curl`) and tells you whether
+that is newer than the version you run. It never downloads or installs anything by itself, and
+nothing is checked in the background. It needs `curl` on the Frame.
 
 How it runs: the program is a systemd *user* service (`~/.config/systemd/user/frame-notify.service`),
 so it starts when your user session does, which is at boot on the Frame, and is restarted if it
@@ -288,6 +297,7 @@ Frame's Python tooling; the panel reports it when they are missing. Settings, al
 | `FRAME_NOTIFY_PYTHON=/path/to/python3` | Interpreter for the helper (default `python3`). |
 | `FRAME_NOTIFY_BRIDGE=/path/to/ancs_bridge.py` | Helper script, when it is not in `scripts/` beside the build directory. |
 | `FRAME_NOTIFY_PANEL_WIDTH=1.5` | Width of the dashboard panel in metres (0.8 to 4; the height follows). |
+| `FRAME_NOTIFY_REPO=owner/name` | The GitHub repository that Check for updates asks about (default: this one). |
 | `FRAME_NOTIFY_QUIET_NO_TOAST=1` | No toast for notifications the iPhone flags as silent (they still go in the list). |
 
 The pairing screens hang from the top of the panel, so their buttons stay high in the dashboard.

@@ -8,10 +8,12 @@
 # start by itself when the Frame starts (a systemd user service) and to wait in the background
 # for SteamVR.
 #
-# Run from inside an unpacked release, it installs that release; run on its own, it downloads the
-# latest one from GitHub and checks its checksum first.
+# Run from inside an unpacked release, it installs that release; run on its own, or from the
+# installed copy (~/.local/share/frame-notify/install.sh), it downloads the latest one from GitHub
+# and checks its checksum first, which is also how it updates.
 #
 #   install.sh [--no-autostart] [--version vX.Y.Z]      install or update
+#   install.sh --download                               download even from inside an unpacked release
 #   install.sh --uninstall [--purge]                    remove it (--purge also deletes the
 #                                                       notification history and the paired phone)
 set -euo pipefail
@@ -24,6 +26,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/frame-notify"
 UNIT="frame-notify.service"
 
 AUTOSTART=1
+DOWNLOAD=0
 UNINSTALL=0
 PURGE=0
 VERSION=""
@@ -34,12 +37,14 @@ fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
-    sed -n '2,19p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+    # The comment block at the top of this file.
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]:-$0}"
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-autostart) AUTOSTART=0 ;;
+        --download) DOWNLOAD=1 ;;
         --uninstall) UNINSTALL=1 ;;
         --purge) PURGE=1 ;;
         --version) shift; VERSION="${1:-}"; [ -n "$VERSION" ] || fail "--version needs a value such as v0.1.0" ;;
@@ -97,9 +102,12 @@ fi
 # --- where the files come from ---------------------------------------------------------------
 
 SOURCE_DIR=""
-if [ -n "${BASH_SOURCE[0]:-}" ]; then
+if [ "$DOWNLOAD" -eq 0 ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
-    if [ -n "$here" ] && [ -f "$here/frame-notify" ] && [ -d "$here/scripts" ] && [ -d "$here/fonts" ]; then
+    installed="$(cd "$APP_DIR" 2>/dev/null && pwd || true)"
+    # The installed copy is not a release to install from: copying it onto itself would destroy it.
+    if [ -n "$here" ] && [ "$here" != "$installed" ] && [ -f "$here/frame-notify" ] &&
+       [ -d "$here/scripts" ] && [ -d "$here/fonts" ]; then
         SOURCE_DIR="$here"
     fi
 fi

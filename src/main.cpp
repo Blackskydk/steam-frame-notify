@@ -7,6 +7,7 @@
 #include "openvr/vr_session.h"
 #include "system/autostart.h"
 #include "system/single_instance.h"
+#include "system/update_check.h"
 #include "ui/app_style.h"
 #include "ui/phone_info.h"
 #include "ui/settings_info.h"
@@ -214,6 +215,28 @@ frame_notify::ui::SettingsInfo read_settings(const frame_notify::system::Autosta
     return settings;
 }
 
+void apply_update_status(frame_notify::ui::SettingsInfo& settings, const frame_notify::system::UpdateStatus& status) {
+    using frame_notify::system::UpdateState;
+    settings.update_latest = status.latest;
+    settings.update_message = status.message;
+    switch (status.state) {
+    case UpdateState::kIdle: settings.update_state.clear(); break;
+    case UpdateState::kChecking: settings.update_state = "checking"; break;
+    case UpdateState::kCurrent: settings.update_state = "current"; break;
+    case UpdateState::kAvailable: settings.update_state = "available"; break;
+    case UpdateState::kUnknown: settings.update_state = "unknown"; break;
+    case UpdateState::kFailed: settings.update_state = "failed"; break;
+    }
+}
+
+// Where the newest release is announced: the repository's "releases/latest" address.
+std::string releases_url() {
+    const char* repository = std::getenv("FRAME_NOTIFY_REPO");
+    return std::string("https://github.com/") +
+           (repository != nullptr && *repository != '\0' ? repository : "Blackskydk/steam-frame-notify") +
+           "/releases/latest";
+}
+
 int run_autostart_command(std::string_view command) {
     frame_notify::system::Autostart autostart(frame_notify::system::Autostart::default_options());
     std::string error;
@@ -314,6 +337,7 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
 
     system::Autostart autostart(system::Autostart::default_options());
     ui::SettingsInfo settings = read_settings(autostart);
+    system::UpdateChecker updates({FRAME_NOTIFY_VERSION, releases_url()});
 
     // SteamVR: the panel and the toasts exist only while SteamVR runs. A pause before the first
     // attempt grows with each failed connection, so a SteamVR that cannot be used is not hammered.
@@ -375,6 +399,18 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
             if (show_toast && !vr.notification().show(notification_user_value(current.id), toast)) {
                 std::cerr << "[Notification] Native toast failed for id=" << current.id << '\n';
             }
+        }
+
+        if (updates.poll()) {
+            const auto& found = updates.status();
+            if (found.state == system::UpdateState::kFailed) {
+                std::cerr << "[Update] Check failed: " << found.message << '\n';
+            } else {
+                std::cout << "[Update] Newest release: " << found.latest << " (this is " << FRAME_NOTIFY_VERSION
+                          << ")\n";
+            }
+            apply_update_status(settings, found);
+            if (vr.attached()) vr.dashboard().set_settings(settings);
         }
 
         if (!vr.attached()) {
@@ -466,6 +502,7 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
                     std::string error;
                     const bool done = was_enabled ? autostart.disable(error) : autostart.enable(error);
                     settings = read_settings(autostart);
+                    apply_update_status(settings, updates.status());
                     if (!done) {
                         settings.message = std::string("Could not turn autostart ") +
                                            (was_enabled ? "off: " : "on: ") + error;
@@ -476,6 +513,16 @@ Outcome run(const Options& options, const std::string& executable, bool after_se
                     dashboard.set_settings(settings);
                     break;
                 }
+                case DashboardActionType::CheckForUpdates:
+                    if (updates.start()) {
+                        std::cout << "[Update] Asking github.com for the newest release\n";
+                        if (updates.status().state == system::UpdateState::kFailed) {
+                            std::cerr << "[Update] Check failed: " << updates.status().message << '\n';
+                        }
+                        apply_update_status(settings, updates.status());
+                        dashboard.set_settings(settings);
+                    }
+                    break;
                 }
             }
             if (outcome.restart) break;

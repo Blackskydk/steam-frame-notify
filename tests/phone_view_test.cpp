@@ -376,18 +376,22 @@ int main() {
         const PhoneScreen screen = describe_settings_screen(off);
         EXPECT(screen.title == "Settings" && screen.icon == PhoneIcon::kGear);
         EXPECT(mentions(screen, "Start automatically: off") && mentions(screen, "Frame Notify 1.2.3"));
-        EXPECT(screen.buttons.size() == 2U && screen.buttons[0].id == PhoneButton::kToggleAutostart);
+        EXPECT(screen.buttons.size() == 3U && screen.buttons[0].id == PhoneButton::kToggleAutostart);
         EXPECT(screen.buttons[0].label == "Turn on autostart" && screen.buttons[0].style == ButtonStyle::kPrimary);
-        EXPECT(screen.buttons[1].id == PhoneButton::kClose);
+        EXPECT(screen.buttons[1].id == PhoneButton::kCheckForUpdates && screen.buttons[1].label == "Check for updates");
+        EXPECT(screen.buttons[2].id == PhoneButton::kClose);
+        // Before anything is asked, it says what asking does, including that nothing is asked on its own.
+        EXPECT(mentions(screen, "github.com") && mentions(screen, "only when you tap"));
 
         SettingsInfo on;
         on.autostart_enabled = true;
         on.autostart_method = "systemd";
         const PhoneScreen enabled = describe_settings_screen(on);
         EXPECT(mentions(enabled, "Start automatically: on") && enabled.tone == Tone::kGood);
-        EXPECT(enabled.buttons.size() == 2U && enabled.buttons[0].id == PhoneButton::kClose &&
+        EXPECT(enabled.buttons.size() == 3U && enabled.buttons[0].id == PhoneButton::kClose &&
                enabled.buttons[0].style == ButtonStyle::kPrimary);
         EXPECT(enabled.buttons[1].id == PhoneButton::kToggleAutostart && enabled.buttons[1].label == "Turn off autostart");
+        EXPECT(enabled.buttons[2].id == PhoneButton::kCheckForUpdates);
         EXPECT(!mentions(enabled, "desktop autostart entry") && enabled.footer.empty());
         on.autostart_method = "desktop";
         EXPECT(mentions(describe_settings_screen(on), "desktop autostart entry"));
@@ -401,15 +405,63 @@ int main() {
         PhoneView view;
         view.set_screen(describe_settings_screen(off));
         EXPECT(view.render().size() == static_cast<std::size_t>(panel_width) * static_cast<std::size_t>(view.content_height()) * 4U);
-        EXPECT(view.button_rects().size() == 2U);
+        EXPECT(view.button_rects().size() == 3U);
+        for (std::size_t index = 0; index < view.button_rects().size(); ++index) {
+            const PhoneButtonRect& rect = view.button_rects()[index];
+            const auto pressed = view.hit_test((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+            EXPECT(pressed && pressed->button == describe_settings_screen(off).buttons[index].id);
+            EXPECT(rect.left >= 0 && rect.right <= panel_width && rect.right - rect.left >= 150);
+        }
         const PhoneButtonRect toggle = view.button_rects()[0];
         const auto hit = view.hit_test((toggle.left + toggle.right) / 2, (toggle.top + toggle.bottom) / 2);
         EXPECT(hit && hit->button == PhoneButton::kToggleAutostart);
-        EXPECT(toggle.bottom < panel_height * 7 / 10);
+        EXPECT(toggle.bottom < panel_height * 4 / 5);
         PhoneView enabled_view;
-        enabled_view.set_screen(describe_settings_screen(SettingsInfo{true, "systemd", {}, {}}));
+        SettingsInfo enabled_info;
+        enabled_info.autostart_enabled = true;
+        enabled_info.autostart_method = "systemd";
+        enabled_view.set_screen(describe_settings_screen(enabled_info));
         EXPECT(view.signature() != enabled_view.signature());
         EXPECT(checksum(view.render()) != checksum(enabled_view.render()));
+        // What the update check says, in each state.
+        const auto update_screen = [&](std::string state, std::string latest = {}, std::string message = {}) {
+            SettingsInfo info;
+            info.version = "0.1.1";
+            info.update_state = std::move(state);
+            info.update_latest = std::move(latest);
+            info.update_message = std::move(message);
+            return describe_settings_screen(info);
+        };
+        const PhoneScreen checking = update_screen("checking");
+        EXPECT(mentions(checking, "Checking for updates"));
+        EXPECT(checking.buttons[1].id == PhoneButton::kCheckForUpdates && checking.buttons[1].label != "Check for updates");
+        const PhoneScreen current = update_screen("current");
+        EXPECT(mentions(current, "You have the latest version (0.1.1)") && current.tone == Tone::kNeutral);
+        EXPECT(current.buttons[1].label == "Check for updates");
+        const PhoneScreen available = update_screen("available", "0.2.0");
+        EXPECT(mentions(available, "Version 0.2.0 is available (you have 0.1.1)") && mentions(available, "install command"));
+        EXPECT(available.tone == Tone::kActive);
+        EXPECT(mentions(update_screen("unknown", "0.2.0"), "The newest release is 0.2.0"));
+        EXPECT(mentions(update_screen("failed", "", "Could not reach github.com. Is the Frame online?"), "Could not reach github.com"));
+        EXPECT(mentions(update_screen("failed"), "update check failed"));
+        SettingsInfo bare;
+        bare.update_state = "available";
+        bare.update_latest = "0.2.0";
+        EXPECT(mentions(describe_settings_screen(bare), "Version 0.2.0 is available.") );   // no own version to mention
+        EXPECT(!mentions(describe_settings_screen(bare), "(you have"));
+        {
+            PhoneView first;
+            PhoneView second;
+            first.set_screen(update_screen("current"));
+            second.set_screen(update_screen("available", "0.2.0"));
+            EXPECT(first.signature() != second.signature() && checksum(first.render()) != checksum(second.render()));
+            for (const PhoneScreen& screen_under_test : {checking, current, available}) {
+                PhoneView laid_out;
+                laid_out.set_screen(screen_under_test);
+                EXPECT(laid_out.button_rects().size() == 3U);
+                for (const auto& rect : laid_out.button_rects()) EXPECT(rect.bottom < panel_height * 4 / 5);
+            }
+        }
         PhoneView long_problem;
         SettingsInfo wordy;
         wordy.message = std::string(3000, 'w');

@@ -109,6 +109,19 @@ if command -v curl >/dev/null 2>&1; then
     if ! contains "$work/install4.txt" "Installed Frame Notify 9.9.9"; then echo "--- download install output"; cat "$work/install4.txt"; fi
     check "the downloaded program is in place" test -x "$app/frame-notify"
 
+    # The installed copy updates from the download; it must not try to install from itself, which
+    # would delete the very files it copies.
+    echo "stale" > "$app/scripts/old_file.py"
+    printf '0.0.1\n' > "$app/VERSION"
+    FRAME_NOTIFY_DOWNLOAD_BASE="$(file_url "$out")" run_install bash "$app/install.sh" > "$work/install4b.txt" 2>&1
+    check "the installed copy downloads the newest release" contains "$work/install4b.txt" "Downloading Frame Notify"
+    check "  and reports the update" contains "$work/install4b.txt" "Updated Frame Notify from 0.0.1 to 9.9.9"
+    check "  replacing the old files" test ! -e "$app/scripts/old_file.py"
+    check "  and leaving itself whole" test -f "$app/scripts/ancs_service.py" -a -f "$app/fonts/Inter-Regular.ttf" -a -x "$app/install.sh"
+    # --download also works from inside an unpacked release.
+    FRAME_NOTIFY_DOWNLOAD_BASE="$(file_url "$out")" run_install bash "$work/unpacked/frame-notify/install.sh" --download > "$work/install4c.txt" 2>&1
+    check "--download downloads even from an unpacked release" contains "$work/install4c.txt" "Downloading Frame Notify"
+
     # A damaged download is refused and nothing is installed.
     rm -rf "$work/home/.local" "$work/damaged"
     mkdir -p "$work/damaged"
@@ -151,6 +164,8 @@ check "uninstalling twice is harmless" contains "$work/uninstall3.txt" "Frame No
 # ---- options ----
 check_not "an unknown option is an error" run_install bash "$root/scripts/install.sh" --frobnicate
 check "help works" run_install bash "$root/scripts/install.sh" --help
+run_install bash "$root/scripts/install.sh" --help > "$work/help.txt" 2>&1
+check "help shows the options, and only the options" bash -c "grep -q -- '--uninstall' '$work/help.txt' && grep -q -- '--download' '$work/help.txt' && ! grep -q 'set -euo' '$work/help.txt' && ! grep -q '^REPO=' '$work/help.txt'"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures check(s) failed"

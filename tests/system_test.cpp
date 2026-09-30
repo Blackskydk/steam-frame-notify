@@ -132,6 +132,49 @@ int main() {
         EXPECT(loud.exit_code == 0 && loud.output.size() <= 1000U && !loud.output.empty());
     }
 
+    // ---- A program in the background ----
+    {
+        AsyncProcess idle;
+        EXPECT(idle.poll() && !idle.running() && !idle.result().started);   // nothing started: nothing to wait for
+
+        AsyncProcess process;
+        EXPECT(process.start({"/bin/sh", "-c", "sleep 1; echo done; exit 4"}));
+        EXPECT(process.running());
+        const auto began = std::chrono::steady_clock::now();
+        EXPECT(!process.poll());                                          // still going, and poll did not wait
+        EXPECT(std::chrono::steady_clock::now() - began < std::chrono::milliseconds(300));
+        while (!process.poll()) ::usleep(5000);
+        EXPECT(!process.running() && process.result().started && process.result().exit_code == 4);
+        EXPECT(process.result().output == "done" && !process.result().timed_out);
+        EXPECT(process.poll());                                           // and stays finished
+
+        EXPECT(process.start({"/bin/sh", "-c", "echo again"}));            // the same object can run another program
+        EXPECT(process.result().output.empty());
+        while (!process.poll()) ::usleep(5000);
+        EXPECT(process.result().output == "again" && process.result().exit_code == 0);
+
+        EXPECT(process.start({"/bin/sh", "-c", "exec sleep 30"}, {}, std::chrono::milliseconds(250)));
+        const auto waiting = std::chrono::steady_clock::now();
+        while (!process.poll()) ::usleep(5000);
+        EXPECT(process.result().timed_out && process.result().exit_code == -1);
+        EXPECT(std::chrono::steady_clock::now() - waiting < std::chrono::seconds(5));
+
+        const fs::path marker = work / "async-ran";
+        {
+            AsyncProcess leaving;
+            EXPECT(leaving.start({"/bin/sh", "-c", "sleep 1; echo late > '" + marker.string() + "'"}));
+        }                                                                 // destroyed while running: the program is stopped
+        ::usleep(1500000);
+        EXPECT(!fs::exists(marker));
+
+        AsyncProcess broken;
+        const bool started = broken.start({"/nonexistent/program-for-frame-notify"});
+        while (started && !broken.poll()) ::usleep(5000);
+        EXPECT(!started ? (broken.poll() && !broken.result().started && !broken.result().output.empty())
+                        : broken.result().exit_code == 127);
+        EXPECT(!broken.start({}));
+    }
+
     // ---- Autostart ----
     const fs::path bin = work / "bin";
     const fs::path config = work / "config";
